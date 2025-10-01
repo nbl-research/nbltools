@@ -1,0 +1,388 @@
+#!/bin/bash -e
+
+##################################
+# Ahmad Beyh | NatBrainLab       #
+# ID: register_brain_using_ants  #
+# Version: 20220707              #
+##################################
+
+usage() {
+cat << EOF
+
+**********
+
+Usage:
+  $(basename $0) -i <input_brain> -r <template_brain> [options] 
+
+Normalises the input brain to the chosen template brain using ANTs.
+
+Options
+  -o <output_basename> ... Basename for output files.
+  -ih <input_head> ....... Input image containing head (not skull-stripped).
+  -rh <template_head> .... Template image containing head (not skull-stripped).
+  -l <lesion_mask> ....... If the input image contains a lesion, you can provide 
+                           a mask that indicates which voxels are part of the lesion.
+                           I.e., the mask has a value of 1 within the lesion and 0 outside.
+  -cost <method> ......... Cost function. Can be 'syn' (default) or 'mi'.
+  -rigid ................. Rigid only - does not perform full affine & nonlinear registration.
+  -affine ................ Affine only - does not perform nonlinear registration.
+
+If you only provide the input brain images through options -i and -r, then 
+both the affine and warp transfoms are estimated based on these images.
+If you also provide the head images, then the affine is estimated based on 
+the brain images and the warps based on the head images.
+
+Example 1:
+We want to normalise the image "brain.nii.gz" to MNI space. We can run:
+  $(basename $0) -i brain.nii.gz -r MNI152_T1_1mm_brain.nii.gz
+Given that we did not specify anything for output, the output will be:
+  brain_to_template_0GenericAffine.mat
+  brain_to_template_1InverseWarp.nii.gz
+  brain_to_template_1Warp.nii.gz
+  brain_to_template_Warped.nii.gz
+
+Example 2:
+We can additionally specify the output basename by running (notice the underscore):
+  $(basename $0) -i brain.nii.gz -r MNI152_T1_1mm_brain.nii.gz -o output_directory/brain_to_MNI_
+In this case, the output will be:
+  output_directory/brain_to_MNI_0GenericAffine.mat
+  output_directory/brain_to_MNI_1InverseWarp.nii.gz
+  output_directory/brain_to_MNI_1Warp.nii.gz
+  output_directory/brain_to_MNI_Warped.nii.gz
+
+**********
+
+EOF
+exit 1
+}
+
+[ $# -eq 0 ] && usage
+
+
+### Error if ANTs is not installed.
+which antsRegistration &>/dev/null
+exVal=$(echo $?)
+if [ "$exVal" != "0" ]; then
+  echo
+  echo "$(basename $0): ERROR: ANTs must be installed."
+  echo
+  exit 1
+fi
+
+
+### Input options.
+t1In=
+refIn=
+outIn=
+t1HIn=
+refHIn=
+lesionIn=
+lesionCmd=
+cost="syn"
+rigOnly=0
+affOnly=0
+
+while [[ $# -gt 0 ]]; do
+  flag="$1"
+  case $flag in
+    -i) t1In="$2"     ; shift 2 ;;
+    -r) refIn="$2"    ; shift 2 ;;
+    -ih) t1HIn="$2"   ; shift 2 ;;
+    -rh) refHIn="$2"  ; shift 2 ;;
+    -l) lesionIn="$2" ; shift 2 ;;
+    -o) outIn="$2"    ; shift 2 ;;
+    -cost) cost="$2"  ; shift 2 ;;
+    -rigid) rigOnly=1 ; shift   ;;
+    -affine) affOnly=1; shift   ;;
+    -h|--h|-help|--help) usage;;
+    *) echo "$(basename $0): ERROR: bad input."; exit 1;;
+  esac
+done
+
+[[ $rigOnly == 1 ]] && affOnly=1
+
+inputError() {
+echo
+echo "${1}: ERROR: No $2 provided."
+echo
+exit 1
+}
+
+[ "$t1In" == "" ] && inputError $(basename $0) "input brain image"
+[ "$refIn" == "" ] && inputError $(basename $0) "template brain image"
+
+if [ "$t1HIn" != "" ] && [ "$refHIn" == "" ]; then
+  inputError $(basename $0) "reference head image"
+fi
+if [ "$t1HIn" == "" ] && [ "$refHIn" != "" ]; then
+  inputError $(basename $0) "input head image"
+fi
+
+
+### Deal with input file names and extensions, and set basename for output files.
+# T1
+t1=$(cd $(dirname $t1In) && pwd)/$(basename $t1In)
+[ "${t1: -4}" == ".nii" ] && t1Name=${t1::${#t1}-4}
+[ "${t1: -7}" == ".nii.gz" ] && t1Name=${t1::${#t1}-7}
+t1Out=${t1Name}_to_template_
+
+[ "$t1HIn" != "" ] && t1HIn=$(cd $(dirname "$t1HIn") && pwd)/$(basename "$t1HIn")
+
+# Template
+template=$(cd $(dirname $refIn) && pwd)/$(basename $refIn)
+[ "${template: -4}" == ".nii" ] && templateName=${template::${#template}-4}
+[ "${template: -7}" == ".nii.gz" ] && templateName=${template::${#template}-7}
+
+[ "$refHIn" != "" ] && refHIn=$(cd $(dirname "$refHIn") && pwd)/$(basename "$refHIn")
+
+# Lesion
+if [ "$lesionIn" != "" ]; then
+  
+  lesion=$(cd $(dirname $lesionIn) && pwd)/$(basename $lesionIn)
+  [ "${lesion: -4}" == ".nii" ] && lesionName=${lesion::${#lesion}-4}
+  [ "${lesion: -7}" == ".nii.gz" ] && lesionName=${lesion::${#lesion}-7}
+  
+  # Invert lesion mask.
+  weightMask=${lesionName}_inverse.nii.gz
+  fslmaths $lesion -bin -mul -1 -add 1 $weightMask
+#  fslmaths $t1 -bin -mul $weightMask $weightMask
+  
+  # Create FOV mask for reference image.
+  refMask=/tmp/refMask_${RANDOM}${RANDOM}.nii.gz
+  fslmaths $template -bin -dilall $refMask
+  
+  lesionCmd="--masks [$refMask,$weightMask]"
+  
+fi
+
+# Output basename.
+if [ "$outIn" == "" ]; then
+  out="$t1Out"
+else
+  out="$outIn"
+fi
+
+# Check cost.
+if [ "$cost" != "syn" ] && [ "$cost" != "mi" ]; then
+  echo
+  echo "$(basename $0): ERROR: Cost function '$cost' not recognised. Must be 'syn' or 'mi'."
+  echo
+  exit 1
+fi
+
+### Define log file
+logFile=${out%_}.log
+
+
+### Define some parameters for ANTs.
+# General
+winsorizeLimits=[0.005,0.995]
+
+# SyN
+if [ "$cost" == "syn" ]; then
+  nlinConvergence=[100x70x50x20,1e-6,10]
+  nlinMetric="--metric CC[$template,$t1,1,4]"
+elif [ "$cost" == "mi" ]; then
+  nlinConvergence=[100x70x50x20,1e-6,10]
+  nlinMetric="--metric MI[$template,$t1,1,32]"
+fi
+
+
+# Are we using heads?
+if [ "$t1HIn" != "" ]; then
+  
+  # Change SyN metric accordingly.
+  if [ "$cost" == "syn" ]; then
+    nlinMetric="--metric CC[$refHIn,$t1HIn,1,4]"
+  elif [ "$cost" == "mi" ]; then
+    nlinMetric="--metric MI[$refHIn,$t1HIn,1,32]"
+  fi
+  
+  # Change initial message accordingly.
+  addHInToMessage="Input head ......... $t1HIn"
+  addRHInToMessage="Reference head ..... $refHIn"
+  
+else
+  
+  addHInToMessage=
+  addRHInToMessage=
+  
+fi
+
+
+{ # BEGIN CODE BLOCK FOR REDIRECTION TO LOG FILE  ------------------------------------
+
+
+### Display start message.
+cat << EOF
+
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+$(basename $0)
+$(date)
+Reference brain .... $template
+$addRHInToMessage
+Input brain ........ $t1
+$addHInToMessage
+------------
+
+EOF
+
+### Define ANTs affine command text.
+if [ $rigOnly == 1 ]; then
+antsCmdAffineTxt() {
+cat << EOF
+antsRegistration \
+////  --dimensionality 3 \
+////  --float 0 \
+////  --output $out \
+////  --interpolation BSpline \
+////  --winsorize-image-intensities $winsorizeLimits \
+////  --use-histogram-matching 1 \
+////  --initial-moving-transform [$template,$t1,1] \
+////  --transform Rigid[0.1] \
+////    --metric MI[$template,$t1,1,32,Regular,0.25] \
+////    --convergence [1000x500x250x100,1e-6,10] \
+////    --shrink-factors 8x4x2x1 \
+////    --smoothing-sigmas 3x2x1x0vox \
+////  --verbose
+EOF
+}
+else
+antsCmdAffineTxt() {
+cat << EOF
+antsRegistration \
+////  --dimensionality 3 \
+////  --float 0 \
+////  --output $out \
+////  --interpolation BSpline \
+////  --winsorize-image-intensities $winsorizeLimits \
+////  --use-histogram-matching 1 \
+////  --initial-moving-transform [$template,$t1,1] \
+////  --transform Rigid[0.1] \
+////    --metric MI[$template,$t1,1,32,Regular,0.25] \
+////    --convergence [1000x500x250x100,1e-6,10] \
+////    --shrink-factors 8x4x2x1 \
+////    --smoothing-sigmas 3x2x1x0vox \
+////  --transform Affine[0.1] \
+////    --metric MI[$template,$t1,1,32,Regular,0.25] \
+////    --convergence [1000x500x250x100,1e-6,10] \
+////    --shrink-factors 8x4x2x1 \
+////    --smoothing-sigmas 3x2x1x0vox \
+////  --verbose
+EOF
+}
+fi
+
+### Define ANTs SyN command text.
+antsCmdSyNTxt() {
+cat << EOF
+antsRegistration \
+////  --dimensionality 3 \
+////  --float 0 \
+////  --output $out \
+////  --interpolation BSpline \
+////  --winsorize-image-intensities $winsorizeLimits \
+////  --use-histogram-matching 1 \
+////  --initial-moving-transform ${out}0GenericAffine.mat \
+////  --transform SyN[0.25] \
+////    $nlinMetric \
+////    --convergence $nlinConvergence \
+////    --shrink-factors 8x4x2x1 \
+////    --smoothing-sigmas 3x2x1x0vox \
+////  --verbose \
+////  $lesionCmd 
+EOF
+}
+
+### Run ANTs affine command.
+antsCmdAffineTxt | awk -F "////" '{$1=$1}1' OFS='\\\n' # echo to terminal and log file
+echo
+echo "------------------------------"
+echo
+
+antsCmdAffine=$(antsCmdAffineTxt | awk -F "////" '{$1=$1}1')
+$antsCmdAffine 
+
+echo
+echo "-=-=-=-=-=-=-=-=-=-=-=-=-=-=-="
+echo
+
+### Run ANTs SyN command.
+if [ $affOnly == 0 ]; then
+  antsCmdSyNTxt | awk -F "////" '{$1=$1}1' OFS='\\\n' # echo to terminal and log file
+  echo
+  echo "------------------------------"
+  echo
+  
+  antsCmdSyN=$(antsCmdSyNTxt | awk -F "////" '{$1=$1}1')
+  $antsCmdSyN 
+fi
+
+### Display update.
+cat << EOF
+
+----------------------------------------------------------
+ANTs finished. Applying transformations to input images...
+----------------------------------------------------------
+
+EOF
+
+
+### Apply transforms to input image.
+
+if [ $affOnly == 1 ]; then
+  applyWarpOpt=" "
+  imgOutSuff=Affined
+else
+  applyWarpOpt="-t ${out}1Warp.nii.gz"
+  imgOutSuff=Warped
+fi
+
+antsApplyTransforms \
+  -d 3 \
+  -i ${t1} \
+  -r ${template} \
+  -o ${out}${imgOutSuff}.nii.gz \
+  $applyWarpOpt \
+  -t ${out}0GenericAffine.mat \
+  -n BSpline \
+  -v
+
+if [ "$t1HIn" != "" ]; then
+  antsApplyTransforms \
+    -d 3 \
+    -i ${t1HIn} \
+    -r ${template} \
+    -o ${out}Head_${imgOutSuff}.nii.gz \
+    $applyWarpOpt \
+    -t ${out}0GenericAffine.mat \
+    -n BSpline \
+    -v
+fi
+
+if [ "$lesionCmd" != "" ]; then
+  antsApplyTransforms \
+    -d 3 \
+    -i ${lesion} \
+    -r ${template} \
+    -o ${out}Lesion_${imgOutSuff}.nii.gz \
+    $applyWarpOpt \
+    -t ${out}0GenericAffine.mat \
+    -n Linear \
+    -v
+fi
+
+### Display finish message.
+cat << EOF
+
+Finished
+$(date)
+
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+EOF
+
+} | tee $logFile
+# END OF REDIRECTION CODE BLOCK  ----------------------------------------------------------
+
+

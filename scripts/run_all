@@ -1,0 +1,291 @@
+#!/bin/bash
+
+##################################
+# Ahmad Beyh | NatBrainLab       #
+# ID: run_all                    #
+# Version: 20201222              #
+##################################
+
+usage() {
+cat << EOF
+
+***************
+
+Usage:
+  $(basename $0) <subject_directory> [options]
+
+NOTE 1:
+  The assumption is that all steps are being run, either through this script
+  or manually. Therefore file names are hard-coded in this script and the 
+  folder structure must be compatible with the pipeline.
+
+NOTE 2:
+  If you haven't placed the acqparams.txt and index.txt files in subjdir/dti,
+  they will automatically be produced assuming you're pre-processing a single
+  series and all volumes are acquired in the same way (see note 4).
+
+NOTE 3:
+  Make sure you've placed the sorder.txt file in subjdir/dti if using -s below.
+
+NOTE 4:
+  THIS VERSION DOES NOT USE TOPUP.
+
+Options:
+  -A ......... Equivalent to running with -f -e -r.
+  -f ......... Run denoising and unringing (default = off).
+  -m ......... Robust brain mask estimation before running eddy (default = off).
+  -e ......... Run eddy (default = off).
+               **This script uses repol.
+               **Eddy is called through the script 'run_eddy'.
+               **Use the option -F below to pass further options to eddy.
+                 Check the defaults of 'run_eddy' to ensure you don't pass options twice.
+  -c <0/1> ... 0 = Call 'eddy_openmp'. 1 = Call 'eddy_cuda'. Default = 1. 
+  -F <opt> ... **DOUBLE-QUOTED** string of further options to pass to eddy.
+  -z <num> ... Number of standard deviations used for eddy's repol.
+  -q ......... Generate eddy QC report (default = off).
+  -s ......... Use slice-to-volume correction in eddy (default = off).
+               Only available with eddy_cuda.
+  -n <num> ... Use <num> for slice-to-volume correction in eddy (default = 6).
+  -h ......... Force --slm=linear option for half-sphere data. If not set, the
+               bvec is automatically checked before running eddy.
+  -r ......... Reorder final data by shell (default = off).
+  -u ......... Unwarp EPI data after eddy based on the subject's T1 image.
+               Required image: \${subject_directory}/t1/\${subject}_T1_rigid_brain.nii.gz.
+               If this processed T1 image is not found, the script will look for the raw 
+               T1 image instead: \${subject_directory}/t1/\${subject}_T1.nii.gz. If it finds 
+               it, then it will apply the script 'register_struct' to it prior to unwarping. 
+               This will include bias correction, optiBET masking, and rigid MNI alignment.
+               Requires StarTrack.sh to be fully functional.
+
+Example 1:
+$(basename $0) ~/data/subject1 -A -m -q 
+
+Example 2:
+$(basename $0) ~/data/subject1 -A -m -z 3 -q -s -n 18 -F "--s2v_lambda=10 --s2v_niter=8"
+
+***************
+
+EOF
+exit 1
+}
+
+[ $# -eq 0 ] && usage
+
+### Check input options.
+if [ ! -e "$1" ]; then
+  echo
+  echo "$(basename $0): ERROR: subject directory does not exist."
+  echo "Directory: $1"
+  echo
+  exit 1
+fi
+subjdir=$(cd $1 && pwd)
+subj=$(basename $subjdir)
+
+shift
+
+fda_prep=0
+optimask=0
+eddy=0
+reord=0
+doQC=0
+ALL=0
+s2v=0
+s2v_num=6
+slmStr=
+stdStr=
+furtherStr=
+furtherFlag=
+cudaOpt=1
+unwarp=0
+
+while [[ $# -gt 0 ]]; do
+    flag="$1"
+    case $flag in
+    
+        -f) fda_prep=1;     shift   ;;
+        -m) optimask=1;     shift   ;;
+        -e)     eddy=1;     shift   ;;
+        -F) furtherStr="$2";
+            furtherFlag="-f "; shift 2 ;;
+        -z) stdStr=" -s $2"; shift 2 ;;
+        -r)    reord=1;     shift   ;;
+        -q)     doQC=1;     shift   ;;
+        -A)      ALL=1;     shift   ;;
+        -s)      s2v=1;     shift   ;;
+        -n)  s2v_num=$2;    shift 2 ;;
+        -h)   slmStr=" -h"; shift   ;;
+        -c)  cudaOpt=$2;    shift 2 ;;
+        -u)   unwarp=1;     shift   ;;
+
+        -help|--help) usage;;
+        *) echo "$(basename $0): ERROR: bad input."; exit 2;;
+    
+    esac
+done
+
+if [ $ALL -eq 1 ]; then
+    fda_prep=1
+    eddy=1
+    reord=1
+#    doQC=1
+fi
+
+# Using eddy_cuda?
+cudaStr=
+if [ $cudaOpt -eq 1 ]; then
+    cudaStr=" -c"
+fi
+
+# Using slice-to-volume correction?
+s2vStr=
+s2vStrQC=
+if [ $s2v -eq 1 ]; then
+    if [ $cudaOpt -eq 0 ]; then
+        echo
+        echo "$(basename $0): ERROR: slice-to-volume correction requires eddy_cuda."
+        echo
+        exit 1
+    fi
+    s2vStr="-k $s2v_num -K $subjdir/dti/sorder.txt"
+    s2vStrQC="-s $subjdir/dti/sorder.txt"
+fi
+
+### Run required steps.
+
+# fda_preproc
+[ $fda_prep -eq 1 ] && run_fda_preproc $subjdir/dti
+
+# run_eddy
+mask=$subjdir/dti/${subj}_MPN_GR_mask.nii.gz
+if [ $eddy -eq 1 ]; then
+    
+    # mask
+    if [ ! -f $mask ]; then
+        if [ $optimask -eq 1 ]; then
+            nbl_optibet_b0_ants -i $subjdir/dti/${subj}_MPN_GR.nii.gz -o $mask
+        else
+            bet $subjdir/dti/${subj}_MPN_GR $subjdir/dti/${subj}_MPN_GR_brain -n -m -f 0.35
+            mv $subjdir/dti/${subj}_MPN_GR_brain_mask.nii.gz $mask
+        fi
+    fi
+    
+    # index
+    if [ ! -f $subjdir/dti/index.txt ]; then
+        prepeddyindex $subjdir/dti/${subj}_MPN_GR.bval -s
+    fi
+    
+    # acqparams
+    if [ ! -f $subjdir/dti/acqparams.txt ]; then
+        echo "0 1 0 0.1" > $subjdir/dti/acqparams.txt
+    fi
+    
+    # half-sphere
+    if [ "$slmStr" == "" ]; then
+      [ $(check_bvecs $subjdir/dti/${subj}_MPN_GR.bvec 1) -eq 0 ] && slmStr="-h"
+    fi
+    
+    # run
+    run_eddy -d $subjdir -i ${subj}_MPN_GR -o ${subj}_MPN_GR_E -r $cudaStr $s2vStr $slmStr $stdStr $furtherFlag "$furtherStr"
+    
+    # copy mask to eddy directory
+    cp $mask $subjdir/dti/eddy/${subj}_MPN_GR_E_mask.nii.gz
+fi
+
+# eddy_quad
+if [ $doQC -eq 1 ]; then
+    echo "Running QC..."
+    eddy_quad \
+      $subjdir/dti/eddy/${subj}_MPN_GR_E \
+      -idx $subjdir/dti/index.txt \
+      -par $subjdir/dti/acqparams.txt \
+      -m $mask \
+      -b $subjdir/dti/${subj}_MPN_GR.bval \
+      -g $subjdir/dti/${subj}_MPN_GR.bvec \
+      $s2vStrQC
+    echo
+fi
+
+# unwarp
+if [ $unwarp -eq 1 ]; then
+    
+    t1=$subjdir/t1/${subj}_T1_rigid_brain.nii.gz
+    if [ ! -e $t1 ]; then
+        if [ -e $subjdir/t1/${subj}_T1.nii.gz ]; then
+            register_struct $subjdir
+        else
+            echo
+            echo "$(basename $0): ERROR: T1 image not found for ${subj}. Cannot unwarp EPI."
+            echo
+            exit 1
+        fi
+    fi
+    
+    ap=$subjdir/ap/${subj}_AP.nii.gz
+    dwi=$subjdir/dti/eddy/${subj}_MPN_GR_E.nii.gz
+    
+    mkdir -p $subjdir/ap
+    
+    fslroi \
+      $dwi \
+      $subjdir/ap/img_hdr_ref \
+      0 1
+    
+    StarTrack.sh \
+      -dwi $dwi \
+      -maps
+    
+    flirt_apply_eye \
+      $subjdir/dti/eddy/${subj}_MPN_GR_E/${subj}_MPN_GR_E_HARDI_AP6np.nii \
+      $subjdir/ap/img_hdr_ref \
+      $ap
+    
+    rm -r $subjdir/dti/eddy/${subj}_MPN_GR_E/
+    
+    vox=$(echo -e $(fslval $dwi pixdim1) '\n' $(fslval $dwi pixdim2) '\n' $(fslval $dwi pixdim3) | sort -n | head -1)
+    vox=$(printf "%0.2f" $vox)
+    
+    flirt \
+      -in $t1 \
+      -ref $t1 \
+      -out ${t1%.nii.gz}_${vox}mm \
+      -applyisoxfm $vox
+    
+    t1=${t1%.nii.gz}_${vox}mm.nii.gz
+    
+    nbl_unwarp_epi_using_ants \
+      $ap \
+      $t1 \
+      y \
+      $dwi
+    
+    dwiName1=${dwi%.nii.gz}_Unwarped
+    dwiName2=${dwi%.nii.gz}_EPI
+    
+    for e in .nii.gz .bval .bvec _mask.nii.gz; do
+      mv ${dwiName1}${e} ${dwiName2}${e}
+    done
+      
+    rm $subjdir/ap/img_hdr_ref.nii.gz
+    
+fi
+
+# el_reorder
+if [ $reord -eq 1 ]; then
+    
+    dwi=$subjdir/dti/eddy/${subj}_MPN_GR_E
+    [ $unwarp -eq 1 ] && dwi=${dwi}_EPI
+    
+    el_reorder $dwi
+    
+    for f in $(find $subjdir/dti/eddy/SORTED/ -type f -name "*_data*.nii.gz"); do
+        n=${f%.nii.gz}
+        cp ${dwi}_mask.nii.gz ${n}_mask.nii.gz
+    done
+    
+fi
+
+
+
+
+

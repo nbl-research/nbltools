@@ -1,0 +1,146 @@
+#!/bin/bash
+
+##################################
+# Ahmad Beyh | NatBrainLab       #
+# ID: run_fda_preproc            #
+# Version: 20231205              #
+##################################
+
+usage() {
+cat << EOF
+
+Usage
+  $(basename $0) <data_directory> [options]
+
+Options
+  -n <0/1> .... Apply MP denoising. Default = 1.
+  -s <0/1> .... Estimate noise map ('full' MP denoising). Default = 1.
+  -g <0/1> .... Apply Gibbs ringing correction. Default = 1.
+
+EOF
+exit 1
+}
+
+[ $# -lt 1 -o $# -gt 15 ] && usage
+
+logopts="$@"
+dir=$(cd $1 && pwd)
+shift
+cd $dir
+logfile=$dir/$(basename $0).$(date +%Y%m%d.%H%M%S).log
+
+# Set defaults.
+noise=1
+denoised=0
+sigma=1
+gibbs=1
+unringed=0
+
+# Parse options.
+while getopts :n:s:g: opt
+do
+  case $opt in
+    n) noise=$OPTARG ;;
+    s) sigma=$OPTARG ;;
+    g) gibbs=$OPTARG ;;
+    *) echo ""; echo " $(basename $0): ERROR: Invalid option -$OPTARG"; echo ""; exit 1;;
+  esac
+done
+
+{ #BEGIN CODE BLOCK FOR REDIRECTION
+
+# Display begin message.
+cat << EOF
+
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+$(date)
+$(basename $0) $logopts
+
+EOF
+
+# Gunzip.
+if [ $(ls *.nii.gz 2>/dev/null | wc -l) -ne 0 ]; then
+  echo "Uncompressing NIfTI files..."
+  gunzip *.nii.gz
+fi
+origNiis=$(find . -maxdepth 1 -type f -name "*.nii" ! -name "*mask.nii" | sort)
+
+# Denoise
+binPath=$(dirname $(which DWIDenoise))
+dnCmd="$binPath/DWIDenoise"
+dnOpt="9"
+dnOptDesc="(window size = $dnOpt)"
+
+if [ "$noise" == "1" ]; then
+  for nii in $origNiis; do
+    if [ $(fslval $nii dim4) -gt 2 ]; then
+      echo
+      echo "Denoising $nii ..."
+      echo "Using $dnCmd $dnOptDesc"
+        "$dnCmd" $nii ${nii%.nii}_MPN.nii ${nii%.nii}_MPN_noise_map.nii $dnOpt
+    else
+      cp $nii ${nii%.nii}_MPN.nii
+    fi
+  done
+  noise=0
+  sigma=0
+  denoised=1
+fi
+
+# Unring
+if [ "$gibbs" == "1" ]; then
+  if [ "$denoised" == "1" ]; then
+    niis4unring=$(ls *MPN.nii)
+  else
+    niis4unring=$(ls *.nii)
+  fi
+  for nii in $niis4unring; do
+    echo
+    echo "UnRinging $nii ..."
+    $binPath/Gibbs $nii ${nii%.nii}_GR.nii 1 1
+  done
+  gibbs=0
+  unringed=1
+fi
+
+echo
+
+# Gzip.
+echo "Compressing NIfTI files..."
+gzip *nii
+
+# Set the suffix added to the name of the file according to which options were chosen.
+# NOTE: order of if statements below is important
+suff=
+[ "$noise" == "1" ] || [ "$denoised" == "1" ] && suff="${suff}_MPN"
+[ "$gibbs" == "1" ] || [ "$unringed" == "1" ] && suff="${suff}_GR"
+
+# Create directory where all output will be moved,
+# then move final niftis back here and copy the
+# bval and bvec with new names.
+newdir=fda_preproc
+mkdir $newdir
+mv *nii.gz *bval *bvec $newdir 
+mv $newdir/*${suff}.nii.gz .
+for f in $origNiis; do
+  n=${f%.nii}
+  cp $newdir/${n}.bval ${n}${suff}.bval
+  cp $newdir/${n}.bvec ${n}${suff}.bvec
+  if [ -f ${n}.json ]; then
+    mv ${n}.json $newdir
+    cp $newdir/${n}.json ${n}${suff}.json
+  fi
+done
+
+# Display finish message.
+cat << EOF
+
+Finished
+$(date)
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+EOF
+
+} | tee "$logfile"
+#END OF CODE BLOCK
+

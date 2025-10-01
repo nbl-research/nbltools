@@ -1,0 +1,218 @@
+#!/bin/bash
+
+##################################
+# Ahmad Beyh | NatBrainLab       #
+# ID: run_all_tu                 #
+# Version: 20201208              #
+##################################
+
+usage() {
+cat << EOF
+
+***************
+
+Usage:
+  $(basename $0) <subject_directory> [options]
+
+NOTE 1:
+  The assumption is that all steps are being run, either through this script
+  or manually. Therefore file names are hard-coded in this script and the 
+  folder structure must be compatible with the pipeline.
+
+NOTE 2:
+  Make sure you've placed the acqparams.txt file in subjdir/dti before running.
+
+NOTE 3:
+  Make sure you've placed the sorder.txt file in subjdir/dti if using -s below.
+
+Options:
+  -A ......... Equivalent to running with -f -p -t -e -r.
+  -f ......... Run denoising and unringing (default = off).
+  -p ......... Prepare for topup (default = off).
+  -b <num> ... Number of b0s from each file to use for topup (default = 2).
+  -i ......... Perform intensity scaling based on B0s. Default = off.
+  -t ......... Run topup (default = off).
+  -m ......... Robust brain mask estimation after topup (default = off).
+               A brain mask is always estimated at this stage using the mean 
+               undistorted B0 image post-topup. By default, the mask is estimated 
+               using bet. If this option is set, the script nbl_optibet_b0_ants 
+               is used instead. This is slower but more robust.
+  -e ......... Run eddy (default = off).
+               **This script uses --repol.
+               **Eddy is called through the script 'run_eddy'.
+               **Use the option -F below to pass further options to eddy.
+                 Check the defaults of 'run_eddy' to ensure you don't pass options twice.
+  -c <0/1> ... 0 = Call 'eddy_openmp'. 1 = Call 'eddy_cuda'. Default = 1.
+  -F <opt> ... **DOUBLE-QUOTED** string of further options to pass to eddy.
+  -T ......... Estimate susceptibility-by-movement in eddy (default = off).
+  -z <num> ... Number of standard deviations used for eddy's repol.
+  -q ......... Generate eddy QC report (default = off).
+  -s ......... Use slice-to-volume correction in eddy (default = off).
+               Only available with eddy_cuda.
+  -n <num> ... Use <num> for slice-to-volume correction in eddy (default = 6).
+  -h ......... Force --slm=linear option for half-sphere data. If not set, the
+               bvec is automatically checked before running eddy.
+  -r ......... Reorder final data by shell (default = off).
+
+***************
+
+EOF
+exit 1
+}
+
+[ $# -eq 0 ] && usage
+
+### Check input options.
+subjdir=$(cd $1 && pwd)
+subj=$(basename $subjdir)
+
+shift
+
+fda_prep=0
+prep=0
+numb0=2
+intScal=0
+topup=0
+optimask=0
+eddy=0
+reord=0
+doQC=0
+ALL=0
+s2v=0
+s2v_num=6
+slmStr=
+stdStr=
+sxm=0
+furtherStr=
+furtherFlag=
+cudaOpt=1
+
+while [[ $# -gt 0 ]]; do
+    flag="$1"
+    case $flag in
+    
+        -f) fda_prep=1;  shift   ;;
+        -p)     prep=1;  shift   ;;
+        -i)  intScal=1;  shift   ;;
+        -b)    numb0=$2; shift 2 ;;
+        -t)    topup=1;  shift   ;;
+        -m) optimask=1;  shift   ;;
+        -T)      sxm=1;  shift   ;;
+        -e)     eddy=1;  shift   ;;
+        -F) furtherStr="$2"; 
+            furtherFlag="-f "; shift 2 ;;
+        -z)   stdStr=" -s $2"; shift 2 ;;
+        -r)    reord=1;  shift   ;;
+        -q)     doQC=1;  shift   ;;
+        -A)      ALL=1;  shift   ;;
+        -s)      s2v=1;  shift   ;;
+        -n)  s2v_num=$2; shift 2 ;;
+        -h)   slmStr=" -h"; shift   ;;
+        -c)  cudaOpt=$2;    shift 2 ;;
+
+        -help|--help) usage;;
+        *) echo "$(basename $0): ERROR: bad input."; exit 2;;
+    
+    esac
+done
+
+if [ $ALL -eq 1 ]; then
+    fda_prep=1
+    prep=1
+    topup=1
+    eddy=1
+    reord=1
+#    doQC=1
+fi
+
+# Using eddy_cuda?
+cudaStr=
+if [ $cudaOpt -eq 1 ]; then
+    cudaStr=" -c"
+fi
+
+# Using slice-to-volume correction?
+s2vStr=
+s2vStrQC=
+if [ $s2v -eq 1 ]; then
+#    if [ $cudaOpt -eq 0 ]; then
+#       echo
+#       echo "$(basename $0): ERROR: slice-to-volume correction requires eddy_cuda."
+#       echo
+#       exit 1
+#    fi
+    s2vStr="-k $s2v_num -K $subjdir/dti/sorder.txt"
+    s2vStrQC="-s $subjdir/dti/sorder.txt"
+fi
+
+# Estimating susceptibility-by-movement in eddy?
+sxmStr=
+if [ $sxm -eq 1 ]; then
+    sxmStr=" -T"
+fi
+
+### Run required steps.
+
+# Check acqparams exist.
+if [ ! -f $subjdir/dti/acqparams.txt ]; then
+  echo
+  echo "$(basename $0): ERROR: Acquisition parameters files is required to run this pipeline."
+  echo "Make sure this file exists: $subjdir/dti/acqparams.txt."
+  echo
+  exit 1
+fi
+
+mask=$subjdir/dti/${subj}_topup_b0_brain_mask.nii.gz
+
+# fda_preproc
+[ $fda_prep -eq 1 ] && run_fda_preproc $subjdir/dti
+
+# prepare_4_topup
+[ $prep -eq 1 ] && prepare_4_topup $subjdir/dti $numb0 $subj $intScal
+
+# run_topup
+[ $topup -eq 1 ] && run_topup -d $subjdir -i ${subj}_b0s_4_topup -o ${subj}_topup
+
+# optibet b0 mask
+if [ $optimask -eq 1 ]; then
+  rm $subjdir/dti/topup/${subj}_topup_b0_brain_mask.nii.gz $mask
+  nbl_optibet_b0_ants -i $subjdir/dti/topup/${subj}_topup_b0_mean.nii.gz -o $subjdir/dti/topup/${subj}_topup_b0_brain_mask.nii.gz
+  cp $subjdir/dti/topup/${subj}_topup_b0_brain_mask.nii.gz $mask
+fi
+
+# run_eddy
+if [ $eddy -eq 1 ]; then
+
+    # half-sphere
+    if [ "$slmStr" == "" ]; then
+      [ $(check_bvecs $subjdir/dti/${subj}_all.bvec 1) -eq 0 ] && slmStr="-h"
+    fi
+    
+    # run
+    run_eddy -d $subjdir -i ${subj}_all -m $mask -o ${subj}_MPN_GR_E_TU -t ${subj}_topup -r $cudaStr $s2vStr $slmStr $stdStr $sxmStr $furtherFlag "$furtherStr"
+
+fi
+
+# eddy_quad
+if [ $doQC -eq 1 ]; then
+    echo "Running QC..."
+    eddy_quad \
+      $subjdir/dti/eddy/${subj}_MPN_GR_E_TU \
+      -idx $subjdir/dti/index.txt \
+      -par $subjdir/dti/acqparams.txt \
+      -m $mask \
+      -b $subjdir/dti/${subj}_all.bval \
+      -g $subjdir/dti/${subj}_all.bvec \
+      $s2vStrQC
+    echo
+fi
+
+# el_reorder + copy brain mask for each shell
+if [ $reord -eq 1 ]; then
+    el_reorder $subjdir/dti/eddy/${subj}_MPN_GR_E_TU
+    for f in $(find $subjdir/dti/eddy/SORTED/ -type f -name "*_data*.nii.gz"); do
+        n=${f%.nii.gz}
+        fslmaths $subjdir/dti/${subj}_topup_b0_brain_mask -ero ${n}_mask
+    done
+fi
+

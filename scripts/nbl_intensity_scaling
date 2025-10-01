@@ -1,0 +1,66 @@
+#!/bin/bash
+
+#############################
+# Ahmad Beyh | NatBrainLab  #
+# id: nbl_intensity_scaling #
+# Version: 20200129         #
+#############################
+
+usage() {
+cat << EOF
+
+Usage: $(basename $0) <file1> <file2> ...
+
+Scales all input images to the same mean.
+If any of the inputs is a 4D file, then the scaling is 
+calculated based on the first volume then applied to each 
+subsequent volume within the 4D series.
+
+The suffix "_scaled" will be added to each file name in the output.
+
+EOF
+exit 1
+}
+
+[ $# -eq 0 ] && usage
+
+if [ $# -lt 2 ]; then
+    echo
+    echo "$(basename $0): ERROR: Two or more files required. Nothing to do."
+    echo
+    exit 1
+fi
+
+c=0
+
+echo 
+
+for f in $@; do
+
+    c=$((c+1))
+
+    name=$f
+    [ "${name: -4}" == ".nii" ] && name=${name::${#name}-4}
+    [ "${name: -7}" == ".nii.gz" ] && name=${name::${#name}-7}
+
+    I=$(fslstats -t $f -m | head -1)
+
+    if [ $c -eq 1 ]; then 
+        NEW=$I
+        echo "Using $f as reference"
+        echo "Setting target mean intensity to $NEW"
+        echo "Saving ${name}_scaled (scaling factor = 1)"
+        fslmaths $f ${name}_scaled
+        continue
+    fi
+
+    R=$(echo "scale=5; ${NEW}/${I}" | bc -l)
+
+    echo "Saving ${name}_scaled (scaling factor = $R)"
+
+    fslmaths $f -mul $R ${name}_scaled
+
+done
+    
+echo
+ 

@@ -1,0 +1,117 @@
+#!/bin/bash
+
+############################
+# Ahmad Beyh | NatBrainLab #
+# ID: nbl_optibet_b0_ants  #
+# Version: 20200424        #
+############################
+
+
+usage() {
+cat << EOF
+
+**********
+
+$(basename $0) -i <b0.nii.gz> -o <output_mask_name.nii.gz> [-r <refDir>] [-d]
+
+  -i <b0.nii.gz> ................. Path to B0 image (with file extension).
+  -o <output_mask_name.nii.gz> ... Path to output image (with file extension).
+  -r <refDir> .................... (Optional) Path to reference directory (see below).
+  -d ............................. (Optional) Debug: keep intermediate files. Default = off.
+
+If REFDIR is specified, and for example is called TEMPLATE, then the used files will be: 
+  TEMPLATE/TEMPLATE.nii.gz
+  TEMPLATE/TEMPLATE_MASK.nii.gz
+
+Default REFDIR is:
+  ~/git/nbltools/data/REF/BRCATLASC_B0_TEMPLATE_2MM/
+
+**********
+
+EOF
+exit 1
+}
+
+[ $# -eq 0 ] && usage
+
+
+### Deal with options.
+input=
+output=
+refDir=
+debug=0
+
+while [[ $# -gt 0 ]]; do
+  flag="$1"
+  case $flag in
+    -i) input="$2"  ; shift 2 ;;
+    -o) output="$2" ; shift 2 ;;
+    -r) refDir="$2" ; shift 2 ;;
+    -d) debug=1 ; shift ;;
+    -help|--help) usage;;
+    *) echo "$(basename $0): ERROR: bad input."; exit 1;;
+  esac
+done
+
+
+if [ "$input" == "" ] || [ "$output" == "" ]; then
+  echo
+  echo "$(basename $0): ERROR: Required input not specified."
+  echo
+  exit 1
+fi
+
+
+### Define basename of temp files.
+inputName=${input%.gz}
+inputName=${inputName%.nii}
+outBase=${inputName}_tmp${RANDOM}_
+
+
+### Define ref template files.
+if [ "$refDir" != "" ]; then
+  refDir=$(cd "$3" && pwd)
+else
+  refDir=/opt/nbl/data/REF/BRCATLASC_B0_TEMPLATE_2MM/
+fi
+refName=$(basename $refDir)
+refBrain=$refDir/${refName}.nii.gz
+refMask=$refDir/${refName}_MASK.nii.gz
+
+
+### Define names of some intermediate files.
+aff=${outBase}0GenericAffine.mat
+warp=${outBase}1Warp.nii.gz
+invWarp=${outBase}1InverseWarp.nii.gz
+warped=${outBase}Warped.nii.gz
+log=${outBase%_}.log
+
+
+### Get first volume if input is 4D.
+if [ $(fslval $input dim4) -ne 1 ]; then
+  fslroi $input ${outBase}vol0 0 1
+  input=${outBase}vol0.nii.gz
+fi
+
+
+### Run ANTs registration of B0 to template.
+nbl_register_brain_using_ants -i $input -r $refBrain -o $outBase
+
+
+### Apply inverse transforms to template mask.
+antsApplyTransforms -d 3 -i $refMask -r $input -o $output -t [$aff,1] -t $invWarp
+
+
+### Binarise final mask.
+fslmaths $output -bin $output
+
+
+### Remove intermediate files if not debugging.
+if [ $debug -eq 0 ]; then 
+  for f in $aff $warp $invWarp $warped $log ${outBase}vol0.nii.gz; do 
+    [ -f $f ] && rm $f
+  done
+fi
+
+
+
