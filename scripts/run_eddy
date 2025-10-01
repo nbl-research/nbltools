@@ -1,0 +1,345 @@
+#!/bin/bash 
+
+##################################
+# Ahmad Beyh | NatBrainLab       #
+# ID: run_eddy                   #
+# Version: 20200123              #
+##################################
+
+usage() {
+cat << EOF
+
+********************
+Usage: $(basename $0) -d <data directory> -i <input file name> [options] 
+
+  Compulsory arguments:
+    -d <data directory> ....(This is where the script will find all the files specified below.)
+    -i <input file name> ...(This is the name of the nifti file to be processed by eddy, and
+                             must have corresponding bval and bvec.)
+
+  Optional:
+    -o <output basename> ...(By default this is set to the input name followed by '_eddy'.)
+    -m <mask name> .........(By default the script looks for input name followed by '_mask'.)
+    -a <acqparams file> ....(By default the script looks for 'acqparams.txt'.)
+    -x <index file> ........(By default the script looks for 'index.txt'.)
+    -r .....................(Replace outliers. Default: off.)
+    -s <std deviations> ....(Used in detecting outliers. Default=4. Also, see below.)
+    -t <topup basename> ....(Uses output from topup: the files must be in a directory called 'topup'.)
+    -T .....................(Estimates interaction between topup field and movement. Default = off.)
+    -k <mporder> ...........(Perform slice2vol correction using mporder parameter. Requires CUDA and slice order file.)
+    -K <slice order file> ..(Required if using -k. By default the script looks for 'sorder.txt'.)
+    -h .....................(Diffusion is sampled on half-sphere. Default is off.)
+    -c .....................(CUDA: runs eddy on the GPU. Default is off.)
+    -f <options> ...........(**DOUBLE-QUOTED** string of further options as per eddy's manual. See example 3.)
+  
+  List of hard-coded options always passed to eddy through this script:
+    --niter=6  --ol_pos  --fwhm=10,5,2,0,0,0  --data_is_shelled  --cnr_maps  --residuals  --very_verbose
+
+  Notes:
+  * This script will always ask eddy to consider positive outliers (i.e. not only signal dropout).
+  * Eddy always looks for outliers. The std deviations option affects this process.
+  * If -r is set, eddy will also replace all the outliers it detects.
+  * If -h is set, a second level model is used by eddy to account for the asymmetric sampling of the diffusion
+    data. This can improve the results for half-sphere data or data with very few difusion directions.
+  
+  Example 1
+    $(basename $0) -d ~/data/ -i dwi.nii.gz -r -t topup_out -c
+
+  Example 2
+    $(basename $0) -d ~/data/ -i dwi.nii.gz -r -t topup_out -c -T -k 8
+  
+  Example 3
+    $(basename $0) -d ~/data/ -i dwi.nii.gz -r -t topup_out -c -T -k 8 -f "--s2v_niter=8 --s2v_lambda=5 --s2v_interp=spline"
+
+********************
+
+EOF
+}
+
+if [ -z ${1+x} ]; then
+  usage
+  exit 1
+fi
+
+
+#===================
+# GET INPUT OPTIONS
+#===================
+
+while getopts :a:cd:f:hi:k:K:m:o:rs:t:Tx: opt
+do
+  case $opt in
+    a)acqp_file=$OPTARG;;
+    c)cuda=1;;    
+    d)datadir=$OPTARG;;
+    f)further="$OPTARG";;
+    h)slm=1;;
+    i)inname=$OPTARG;;
+    k)s2v=$OPTARG;;
+    K)sOrder=$OPTARG;;
+    m)mask=$OPTARG;;
+    o)eddybase=$OPTARG;;
+    r)repol=1;;
+    s)stdv=$OPTARG;;
+    t)topupname=$OPTARG;;
+    T)sxm=1;;
+    x)idx_file=$OPTARG;;
+    *)echo ""; echo " $(basename $0): ERROR: Invalid option -$OPTARG"; echo ""; exit 1;;
+  esac
+done
+
+
+#===============
+# PARSE OPTIONS
+#===============
+
+### cuda vs openmp
+if [ ! -z ${cuda+x} ]; then
+  eddyCmd="eddy_cuda"
+else
+  eddyCmd="eddy_cpu --nthr=$OMP_NUM_THREADS"
+fi
+
+### datadir
+if [ -z ${datadir+x} ]; then
+  echo -e '\n  '$(basename $0)': Bad input: no data directory specified \n'
+  exit 2
+elif [ ! -d $datadir ]; then
+  echo -e '\n  '$(basename $0)': Bad input: data directory not found or is not a directory \n'
+  exit 2
+fi
+
+datadir=$(cd $datadir && pwd)
+[ "${datadir: -1}" == "/" ] &&  datadir=${datadir::${#datadir}-1}
+
+[ -d ${datadir}/dti ] && datadir=${datadir}/dti
+[ -d ${datadir}/dwi ] && datadir=${datadir}/dwi
+
+#cd $datadir ###!!!! important
+
+### inname
+if [ -z ${inname+x} ]; then
+  echo -e '\n  '$(basename $0)': Bad input: input name not specified \n'
+  exit 2
+fi
+
+[ "${inname: -4}" == ".nii" ] && inname=${inname::${#inname}-4}
+[ "${inname: -7}" == ".nii.gz" ] && inname=${inname::${#inname}-7}
+
+if [ ! -f $datadir/${inname}.nii ] && [ ! -f $datadir/${inname}.nii.gz ]; then
+  echo -e '\n  '$(basename $0)': Bad input: input file not found \n'
+  exit 2
+fi
+
+### eddybase
+if [ -z ${eddybase+x} ]; then
+  eddybase=${inname}_eddy
+fi
+
+[ "${eddybase: -4}" == ".nii" ] && eddybase=${eddybase::${#eddybase}-4}
+[ "${eddybase: -7}" == ".nii.gz" ] && eddybase=${eddybase::${#eddybase}-7}
+
+### mask
+if [ -z ${mask+x} ]; then
+  mask=${datadir}/${inname}_mask
+else
+  maskdir=$(cd $(dirname $mask) && pwd)
+  maskname=$(basename $mask)
+  mask=${maskdir}/${maskname}
+fi
+
+[ "${mask: -4}" == ".nii" ] && mask=${mask::${#mask}-4}
+[ "${mask: -7}" == ".nii.gz" ] && mask=${mask::${#mask}-7}
+
+if [ ! -f ${mask}.nii ] && [ ! -f ${mask}.nii.gz ]; then
+  echo -e '\n  '$(basename $0)': Bad input: could not find mask file' $mask '\n'
+  exit 3
+fi
+
+### acqp_file
+if [ -z ${acqp_file+x} ]; then
+  acqp_file=${datadir}/acqparams.txt
+else
+  acqdir=$(cd $(dirname $acqp_file) && pwd)
+  acqname=$(basename $acqp_file)
+  acqp_file=${acqdir}/${acqname}
+fi
+
+if [ ! -f $acqp_file ]; then
+  echo -e '\n  '$(basename $0)': Bad input: could not find acquisition parameters file' $acqp_file '\n'
+  exit 3
+fi
+
+### idx_file
+if [ -z ${idx_file+x} ]; then
+  idx_file=${datadir}/index.txt
+else
+  idxdir=$(cd $(dirname $idx_file) && pwd)
+  idxname=$(basename $idx_file)
+  idx_file=${idxdir}/${idxname}
+fi
+
+if [ ! -f ${idx_file} ]; then
+  echo -e '\n  '$(basename $0)': Bad input: could not find index file' $idx_file '\n'
+  exit 3 
+fi
+
+### stdv
+nbr='^[0-9]+([.][0-9]+)?$'
+if [ -z ${stdv+x} ]; then
+  stdv=4
+elif ! [[ $stdv =~ $nbr ]]; then
+  echo -e '\n  '$(basename $0)': Bad input: invalid standard deviation argument' $stdv '\n'
+  exit 3
+fi
+
+### topupdir, topupname, eddydir
+if [ ! -z ${topupname+x} ]; then
+  if [ -d ${datadir}/topup ]; then
+    topupdir=${datadir}/topup
+  else
+    echo -e '\n  '$(basename $0)': Bad input: could not find topup directory' $topupdir '\n'
+    exit 3
+  fi
+  if [ ! -f ${topupdir}/${topupname}_fieldcoef.nii.gz ] && [ ! -f ${topupdir}/${topupname}_fieldcoef.nii ]; then
+    echo -e '\n '$(basename $0)': Bad input: could not find topup output in topup directory \n'
+    exit 3
+  fi
+  eddyCmd="$eddyCmd --topup=${topupdir}/${topupname}"
+fi 
+
+### Susceptibility-by-movement
+if [ ! -z ${sxm+x} ]; then
+  if [ -z ${topupname+x} ]; then
+    echo -e '\n '$(basename $0)': ERROR: susceptibility-by-movement estimation (-T) requires topup data. \n'
+    exit 3
+  fi
+  eddyCmd="$eddyCmd --estimate_move_by_susceptibility"
+fi
+  
+### repol
+if [ ! -z ${repol+x} ]; then
+  eddyCmd="$eddyCmd --repol"
+fi
+
+### slm
+if [ ! -z ${slm+x} ]; then
+  eddyCmd="$eddyCmd --slm=linear"
+fi
+
+### slice2vol
+if [ ! -z ${s2v+x} ]; then
+#  if [ -z ${cuda+x} ]; then
+#    echo -e '\n '$(basename $0)': ERROR: slice2vol correction requires CUDA. Please set the -c option. \n'
+#    exit 3
+#  fi
+  eddyCmd="$eddyCmd --mporder=$s2v"
+  if [ -z ${sOrder+x} ]; then
+    if [ -f $datadir/sorder.txt ]; then
+        sOrder=$datadir/sorder.txt
+    else
+        echo -e '\n '$(basename $0)': ERROR: slice2vol correction requires a slice order file. \n Please set the -K option or make sure sorder.txt is in the data directory. \n'
+        exit 3
+    fi
+  fi
+  sOrder=$(cd $(dirname $sOrder) && pwd)/$(basename $sOrder)
+  eddyCmd="$eddyCmd --slspec=$sOrder"
+fi
+
+### other user-defined eddy options
+if [ -z "${further+x}" ]; then
+  further=""
+fi
+
+cd $datadir
+eddydir="${datadir}/eddy"
+mkdir -p $eddydir
+
+#=================
+# CREATE LOG FILE
+#=================
+
+scriptname=`basename $0`
+scriptname=${scriptname%.*}
+scriptdir=`dirname $0`
+logfile=${eddydir}/${scriptname}.log
+
+echo "Running script: "$(cd $scriptdir && pwd)/$(basename $0) > $logfile
+echo "Below is the output of the script:" >> $logfile
+echo "---------------------------------" >> $logfile
+
+{ # begin code block for redirection
+
+#==========
+# RUN EDDY
+#==========
+
+cd $eddydir
+
+cat << EOF
+
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+Eddy
+Started: $(date -R)
+
+EOF
+
+## display message with eddy options (also goes to log file)
+echo -e 'Passing the following options to eddy:\n'
+
+eddyCmd="$eddyCmd \
+--imain=${datadir}/${inname} \
+--mask=${mask} \
+--acqp=${acqp_file} \
+--index=${idx_file} \
+--bvecs=${datadir}/${inname}.bvec \
+--bvals=${datadir}/${inname}.bval \
+--out=${eddybase} \
+--niter=6 \
+--ol_pos \
+--ol_nstd=${stdv} \
+--fwhm=10,5,2,0,0,0 \
+--data_is_shelled \
+--cnr_maps \
+--residuals \
+--very_verbose $further" 
+
+echo "$eddyCmd" | awk '{$1=$1}1' OFS='\n '
+
+## start eddy
+echo -e '\nRunning eddy...\n------------------------------\n'
+
+$eddyCmd
+
+echo -e '\n------------------------------\nRunning eddy...done'
+
+
+
+#==========================
+# RENAMING BVALS AND BVECS
+#==========================
+
+echo -ne 'Renaming bvals and bvecs...\r'
+
+cp ${eddybase}.eddy_rotated_bvecs ${eddybase}.bvec
+cp ${datadir}/${inname}.bval ${eddybase}.bval
+
+echo -e 'Renaming bvals and bvecs...done\n'
+
+
+#=============================================================================
+
+cat << EOF
+Finished: $(date -R)
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+EOF
+
+} | tee -a "$logfile"
+# end of code block
+
+###########
+# THE END #
+###########
+
+

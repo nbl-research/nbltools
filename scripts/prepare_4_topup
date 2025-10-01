@@ -1,0 +1,283 @@
+#!/bin/bash -u
+
+##################################
+# Ahmad Beyh | NatBrainLab       #
+# ID: prepare_4_topup            #
+# Version: 20210718              #
+##################################
+
+#=============
+# CHECK INPUT
+#=============
+
+if [ $# -eq 0 ]; then
+
+cat << EOF
+
+********************
+
+ Usage: $(basename $0)  <data directory>  <number of b0s to take from each file>  <output basename>  <intensity_scaling>
+
+ Example: if the data in the directory /home/data/subject and you want to include 2 b0s
+          for topup from each nifti file in that directory, then you should run:
+
+          $(basename $0) /home/data/subject_1/dti  2  subject_1
+
+ Note: The script assumes that the first n volumes in each file
+       it finds are B0s (n = the number you specify).
+  
+ The last argument <intensity_scaling> should be a boolean that indicates whether 
+ intensity scaling should be performed based on the B0 image from each series.
+ This is optional. Default = 1.
+
+********************
+
+EOF
+exit 1
+fi
+
+datadir=$1
+numb0=$2
+subjname=$3
+
+if [ $# -eq 4 ]; then
+  intScal=$4
+else
+  intScal=1
+fi
+
+if [ ! -d $datadir ]; then
+  echo ""
+  echo "$(basename $0): Bad input: could not find subject directory"
+  echo ""
+  exit 2
+fi
+
+datadir=$(cd $datadir && pwd)
+[ "${datadir: -1}" == "/" ] && datadir=${datadir::${#datadir}-1}
+
+[ -d ${datadir}/DTI ] && datadir=${datadir}/DTI
+[ -d ${datadir}/dti ] && datadir=${datadir}/dti
+[ -d ${datadir}/Diffusion ] && datadir=${datadir}/Diffusion
+[ -d ${datadir}/diffusion ] && datadir=${datadir}/diffusion
+
+cd $datadir
+
+
+#========================
+# CHECK NUMBER OF FILES
+#========================
+
+files=$(find $datadir -maxdepth 1 -type f -name "*.nii*" ! -name "*_mask*" ! -name "mask*" ! -name "*_T1*" ! -name "T1*" ! -name "*_all.nii*" | sort)
+
+if [ "$files" == "" ]; then
+  echo "$(basename $0): Could not find any nifti files in the given directory." 
+  exit 1
+fi
+
+
+#===============================
+# CHECK FOR INCONSISTENT SLICES
+#===============================
+
+files_arr=($files)
+size_x=$(fslval ${files_arr[0]} dim1)
+size_y=$(fslval ${files_arr[0]} dim2)
+size_z=$(fslval ${files_arr[0]} dim3)
+
+size_mismatch=0
+for file in $files; do
+  slice_x=$(fslval $file dim1)
+  slice_y=$(fslval $file dim2)
+  slice_z=$(fslval $file dim3)
+  if [[ $slice_x -ne $size_x ]] || [[ $slice_y -ne $size_y ]] || [[ $slice_z -ne $size_z ]]; then
+    size_mismatch=1
+  fi
+done
+
+if [ $size_mismatch -ne 0 ]; then
+  echo ""
+  echo " $(basename $0): ERROR: Size mismatch found between two or more files."
+  echo ""
+  exit 1
+fi
+
+#======================
+# CHECK FOR ODD SLICES
+#======================
+
+# This part is left here just in case but odd slices are NOT removed.
+# To remove odd slices, change variable removeOddSlices to 1.
+# Do not change variable names of this section.
+# Removal of extra slices is done after concatenating to save time.
+
+removeOddSlices=0
+size_odd=0
+newX=-1
+newY=-1
+newZ=-1
+
+if [[ $((size_x%2)) -ne 0 ]]; then
+  size_odd=1
+  newX=$((size_x-1))  
+fi
+if [[ $((size_y%2)) -ne 0 ]]; then
+  size_odd=1
+  newY=$((size_y-1))  
+fi
+if [[ $((size_z%2)) -ne 0 ]]; then
+  size_odd=1
+  newZ=$((size_z-1))  
+fi
+
+
+#=================
+# CREATE LOG FILE
+#=================
+
+scriptname=$(basename $0)
+scriptname=${scriptname%.*}
+scriptdir=$(dirname $0)
+logfile=${datadir}/${scriptname}.log
+
+echo "Running script: "$(cd $scriptdir && pwd)/$(basename $0) > $logfile
+echo "Below is the output of the script:" >> $logfile
+echo "---------------------------------" >> $logfile
+echo ""
+
+
+#==============================
+# PREPARATION FOR TOPUP & EDDY
+#==============================
+
+{ # BEGIN CODE BLOCK FOR REDIRECTION
+
+echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>" 
+echo "Prepare for topup" 
+echo "Started: $(date)" 
+echo "" 
+echo "Subject name ..................... $subjname " 
+echo "Data directory ................... $datadir" 
+
+
+echo -e '\nPreparing images, bvals and bvecs:\n' 
+
+unscaleddir="${datadir}/unscaled"
+if [ $intScal -eq 1 ]; then
+  nbl_intensity_scaling $files
+  mkdir -p $unscaleddir
+fi
+
+topupdir="${datadir}/topup"
+mkdir -p $topupdir
+
+echo "" > ${subjname}_all.bval
+echo -e '\n\n' > ${subjname}_all.bvec
+
+b0s=""
+idx_f=""
+i=0
+
+for file in $files; do  # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< BEGIN LOOP
+
+  j=$((i+1))
+ 
+  [ "${file: -4}" == ".nii" ] && file=${file::${#file}-4}
+  [ "${file: -7}" == ".nii.gz" ] && file=${file::${#file}-7}
+  [ -f ${file}.nii ] && file_name=${file}.nii
+  [ -f ${file}.nii.gz ] && file_name=${file}.nii.gz
+  
+  if [ $intScal -eq 1 ]; then
+    mv $file_name $unscaleddir
+    mv ${file}_scaled.nii.gz ${file}.nii.gz
+  fi
+  file_name=${file}.nii.gz
+
+  if [ -f ${file}.bval ]; then
+    bval=${file}.bval
+  elif [ -f ${file}.bvals ]; then
+    bval=${file}.bvals
+  else
+    echo
+    echo "$(basename $0): ERROR: cannot find bval file for $file".
+    echo
+    exit 1
+  fi
+
+  if [ -f ${file}.bvec ]; then
+   bvec=${file}.bvec
+  elif [ -f ${file}.bvecs ]; then
+    bvec=${file}.bvecs
+  else
+    echo
+    echo "$(basename $0): ERROR: cannot find bvec file for $file".
+    echo
+    exit 1
+  fi
+
+  size=$(fslval $file dim4)
+  idx_n=$(echo "$numb0*$i+1" | bc)
+
+  echo "  nii ........ $(basename $file_name)" 
+  echo "  bval ....... $(basename $bval)" 
+  echo "  bvec ....... $(basename $bvec)" 
+  echo "  size ....... $size volumes" 
+  echo ""
+
+  for k in $(seq 1 $size); do
+    idx_f=$idx_f" "$idx_n
+  done
+
+  newbval=$(< ${subjname}_all.bval)
+  newbvec=$(< ${subjname}_all.bvec)   
+
+  paste -d ' ' - <(awk '{print $0}' $bval) > ${subjname}_all.bval <<< "$newbval"
+  paste -d ' ' - <(awk '{print $0}' $bvec) > ${subjname}_all.bvec <<< "$newbvec"
+
+  fslroi $file ${subjname}_b0s_${j} 0 $numb0
+  b0s=$b0s" "${subjname}_b0s_${j}.nii.gz
+
+  i=$((i+1))
+
+done  # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< END LOOP
+
+# create index file
+echo $idx_f > index.txt
+
+echo -e 'Preparing images, bvals and bvecs...done' 
+echo "Created index file for eddy: ${datadir}/index.txt" 
+echo -ne 'Merging B0s for topup...\r'
+
+# concatenate b0s for topup
+fslmerge -t ${topupdir}/${subjname}_b0s_4_topup $b0s
+
+echo -e 'Merging B0s for topup...done' 
+echo -ne 'Merging all volumes for eddy...\r'
+
+# concatenate all files for eddy
+fslmerge -t ${subjname}_all $files
+
+echo -e 'Merging all volumes for eddy...done' 
+
+# remove extra slices if required
+if [[ $removeOddSlices -eq 1 ]] && [[ $size_odd -ne 0 ]] ; then
+  echo "WARNING: files have an odd number of voxels along one or more dimensions."
+  echo "Removing extra slices..."
+  for file in ${topupdir}/${subjname}_b0s_4_topup ${subjname}_all; do
+    fslroi $file $file 0 $newX 0 $newY 0 $newZ 0 -1
+  done
+fi
+
+rm $b0s
+
+echo "Finished: "$(date) 
+echo "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
+echo ""
+
+} | tee "$logfile"
+# END CODE BLOCK
+
+###########
+# THE END #
+###########
+

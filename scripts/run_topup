@@ -1,0 +1,229 @@
+#!/bin/bash
+
+##################################
+# Ahmad Beyh | NatBrainLab       #
+# ID: run_topup                  #
+# Version: 20200115              #
+##################################
+
+usage() {
+cat << EOF
+  Usage: $(basename $0) -d <data directory> -i <input file name> -o <output basename> [-a <acqparams file>]
+
+   * input file is a 4D file containing b0s for topup.
+   * output basename will be used for topup output, i.e. output_basename_fieldcoef.nii.gz etc.
+   * if you don't specify the acqparams text file, the script will look for 'acqparams.txt' in the data directory.
+
+EOF
+exit 1
+}
+
+[ $# -lt 1 ] && usage
+
+#=============
+# GET OPTIONS
+#=============
+
+while getopts :d:i:o:a: opt
+do
+case $opt in
+d)datadir=$OPTARG;;
+i)inname=$OPTARG;;
+o)outname=$OPTARG;;
+a)acq=$OPTARG;;
+*)echo -e '\n'  $(basename $0)': Invalid option as argument\n'; exit 1;;
+esac
+done
+
+#===============
+# PARSE OPTIONS
+#===============
+
+###datadir
+if [ -z ${datadir+x} ]; then
+  echo -e '\n  Bad input: no data directory specified \n'
+  exit 2
+elif [ ! -d $datadir ]; then
+  echo -e '\n  Bad input: data directory not found or is not a directory \n'
+  exit 2
+fi
+
+datadir=$(cd $datadir && pwd)
+[ "${datadir: -1}" == "/" ] &&  datadir=${datadir::${#datadir}-1}
+
+#[ -d ${datadir}/DTI ] && datadir=${datadir}/DTI
+[ -d ${datadir}/dti ] && datadir=${datadir}/dti
+#[ -d ${datadir}/Diffusion ] && datadir=${datadir}/Diffusion
+#[ -d ${datadir}/diffusion ] && datadir=${datadir}/diffusion
+
+#cd $datadir
+topupdir="${datadir}/topup"
+
+###inname
+if [ -z ${inname+x} ]; then
+  echo -e '\n Bad input: input file name not specified \n'
+  exit 2
+fi
+
+[ "${inname: -4}" == ".nii" ] && inname=${inname::${#inname}-4}
+[ "${inname: -7}" == ".nii.gz" ] && inname=${inname::${#inname}-7}
+
+if [ -f ${datadir}/${inname}.nii ] || [ -f ${datadir}/${inname}.nii.gz ]; then
+  infile=${datadir}/${inname}
+elif [ -f ${topupdir}/${inname}.nii ] || [ -f ${topupdir}/${inname}.nii.gz ]; then
+  infile=${topupdir}/${inname}
+else
+  echo ""
+  echo "  Could not find ${inname}.nii or ${inname}.nii.gz"
+  echo ""
+  exit 2
+fi
+
+###outname
+if [ -z ${outname+x} ]; then
+  echo -e '\n Bad input: basename for output not specified \n'
+  exit 2
+fi
+
+[ "${outname: -4}" == ".nii" ] && outname=${outname::${#outname}-4}
+[ "${outname: -7}" == ".nii.gz" ] && outname=${outname::${#outname}-7}
+
+###acq
+if [ -z ${acq+x} ]; then
+   if [ -f ${datadir}/acqparams.txt ]; then
+     acq=${datadir}/acqparams.txt
+   elif [ -f ${topupdir}/acqparams.txt ]; then
+     acq=${topupdir}/acqparams.txt
+   else
+     echo ""
+     echo " Could not find acquisition parameters file acqparams.txt"
+     echo " Please make sure this file exists before running, or specify"
+     echo " the location of the file."
+     echo ""
+     exit 2
+   fi
+else
+   acqdir=$(cd $(dirname $acq) && pwd)
+   acqname=$(basename $acq)
+   acq=${acqdir}/${acqname}
+   if [ ! -f $acq ]; then
+     echo ""
+     echo " Could not find acquisition parameters file $acq"
+     echo ""
+     exit 2
+   fi
+fi
+
+### config file
+
+# First, determine if matrix is multiple of 4 or 2 or not.
+szX=$(fslval $infile dim1)
+szY=$(fslval $infile dim2)
+szZ=$(fslval $infile dim3)
+
+if [ $((szX % 4)) -eq 0 ] && [ $((szY % 4)) -eq 0 ] && [ $((szZ % 4)) -eq 0 ]; then
+  configName=b02b0_4.cnf
+elif [ $((szX % 2)) -eq 0 ] && [ $((szY % 2)) -eq 0 ] && [ $((szZ % 2)) -eq 0 ]; then
+  configName=b02b0_2.cnf
+else
+  configName=b02b0_1.cnf
+fi
+
+# Try to find config file in FSLDIR. If not there, try in NBL git dir.
+# Otherwise revert back to default config file.
+configFile=$FSLDIR/src/topup/flirtsch/$configName
+if [ ! -f $configFile ]; then
+  configFile=~/git/nbltools/third_parties/topup_config/$configName
+fi
+if [ ! -f $configFile ]; then
+  configFile=b02b0.cnf
+fi
+
+
+cd $datadir
+mkdir -p $topupdir
+cd $topupdir
+  
+#=================
+# CREATE LOG FILE
+#=================
+
+scriptname=`basename $0`
+scriptname=${scriptname%.*}
+scriptdir=`dirname $0`
+logfile=${topupdir}/${scriptname}.log
+
+echo "Running script: "$(cd $scriptdir && pwd)/$(basename $0) > $logfile
+echo "Below is the output of the script:" >> $logfile
+echo "---------------------------------" >> $logfile
+echo ""
+
+
+#===========
+# RUN TOPUP
+#===========
+
+{ # begin code block for redirection
+
+cat << EOF
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+Topup
+Started: $(date)
+
+  Data directory ................... $datadir
+  Input file ....................... $inname
+  Acquisition parameters file ...... $acq
+  Topup output name ................ $outname
+
+Running topup
+-------------
+
+EOF
+
+# display message with options
+topupCmd="topup \
+ --imain=${infile} \
+ --datain=${acq} \
+ --config=$configFile \
+ --out=${outname} \
+ --fout=${outname}_field \
+ --iout=${outname}_b0_4D \
+ --scale=1 \
+ --verbose"
+
+echo "$topupCmd" | awk '{$1=$1}1' OFS='\n '
+
+# run topup
+$topupCmd
+
+echo -e '\n--------------------'
+echo -e 'Running topup...done'
+
+[ "$(dirname $acq)" != "$datadir" ] && cp $acq $datadir
+
+#================
+# GET BRAIN MASK
+#================
+
+echo -ne 'Producing brain mask...\r'
+
+fslmaths ${outname}_b0_4D -Tmean ${outname}_b0_mean
+bet ${outname}_b0_mean ${outname}_b0_brain -f 0.3 -m -n
+
+cp ${outname}_b0_brain_mask.nii.gz $datadir
+
+echo -e 'Producing brain mask...done' 
+
+
+
+echo "Finished: "$(date)
+echo "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
+echo ""
+
+} | tee -a "$logfile"
+# end of code block
+
+###########
+# THE END #
+###########
+

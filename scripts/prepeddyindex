@@ -1,0 +1,71 @@
+#!/bin/bash
+
+##################################
+# Ahmad Beyh | NatBrainLab       #
+# ID: prepeddyindex              #
+# Version: 20180605              #
+##################################
+
+usage() {
+cat << EOF
+
+Usage
+  $(basename $0) <bval_file_in> [options]
+
+Options
+  -o <file> ... Name of output index file.
+                Default = bval_location/index.txt.
+  -s .......... Single value index. This writes "1"
+                for every volume instead of referring
+                to every B0 occurrence.
+
+Generates the index file that eddy requires by
+referring to each B0 occurrence in the input bval.
+Therefore, the acqparams.txt file this corresponds
+to should have a line for each B0 volume in the data.
+
+EOF
+exit 1
+}
+
+### Check input options.
+
+[ $# -eq 0 ] && usage
+
+dir=$(cd $(dirname $1) && pwd)
+bvalFile=$dir/$(basename $1)
+bval=($(cat $bvalFile))
+indexFile=$dir/index.txt
+single=0
+
+shift
+
+while [[ $# -gt 0 ]]; do 
+    flag="$1"
+    case $flag in
+        -o) indexFile="$2"; shift 2;;
+        -s) single=1; shift;;
+        -h|--h|-help|--help) usage;;
+        *) echo "$(basename $0): ERROR: bad input."; exit 1;;
+    esac
+done
+
+
+### Set-up and start.
+
+numB0=0
+b0Max=100
+fullIndex=()
+index=1
+
+for i in ${!bval[@]}; do
+    if [ $single -eq 0 ] && [ $(echo "${bval[i]} < $b0Max" | bc) -eq 1 ]; then
+        if [ $i -ne 0 ]; then
+            index=$((index+1))
+        fi
+    fi
+        fullIndex+=($(printf "%4d " $index))
+done
+
+echo "${fullIndex[@]}" > $indexFile
+
