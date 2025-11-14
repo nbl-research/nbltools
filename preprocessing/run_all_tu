@@ -3,7 +3,7 @@
 ##################################
 # Ahmad Beyh | NatBrainLab       #
 # ID: run_all_tu                 #
-# Version: 20201208              #
+# Version: 20240517              #
 ##################################
 
 usage() {
@@ -20,16 +20,17 @@ NOTE 1:
   folder structure must be compatible with the pipeline.
 
 NOTE 2:
-  Make sure you've placed the acqparams.txt file in subjdir/dti before running.
+  Make sure you've placed the acqparams.txt file in subjdir/dwi before running.
 
 NOTE 3:
-  Make sure you've placed the sorder.txt file in subjdir/dti if using -s below.
+  Make sure you've placed the sorder.txt file in subjdir/dwi if using -s below.
 
 Options:
-  -A ......... Equivalent to running with -f -p -t -e -r.
+  -A ......... Equivalent to running with -f -p -t -e.
   -f ......... Run denoising and unringing (default = off).
+  -y ......... Use SynB0-DISCO to generate a "reverse-phase" b0.
   -p ......... Prepare for topup (default = off).
-  -b <num> ... Number of b0s from each file to use for topup (default = 2).
+  -b <num> ... Number of b0s from each file to use for topup (default = 1).
   -i ......... Perform intensity scaling based on B0s. Default = off.
   -t ......... Run topup (default = off).
   -m ......... Robust brain mask estimation after topup (default = off).
@@ -70,7 +71,7 @@ shift
 
 fda_prep=0
 prep=0
-numb0=2
+numb0=1
 intScal=0
 topup=0
 optimask=0
@@ -86,6 +87,7 @@ sxm=0
 furtherStr=
 furtherFlag=
 cudaOpt=1
+synb0Opt=0
 
 while [[ $# -gt 0 ]]; do
     flag="$1"
@@ -109,6 +111,7 @@ while [[ $# -gt 0 ]]; do
         -n)  s2v_num=$2; shift 2 ;;
         -h)   slmStr=" -h"; shift   ;;
         -c)  cudaOpt=$2;    shift 2 ;;
+        -y)  synb0Opt=1; shift ;;
 
         -help|--help) usage;;
         *) echo "$(basename $0): ERROR: bad input."; exit 2;;
@@ -121,8 +124,6 @@ if [ $ALL -eq 1 ]; then
     prep=1
     topup=1
     eddy=1
-    reord=1
-#    doQC=1
 fi
 
 # Using eddy_cuda?
@@ -141,8 +142,8 @@ if [ $s2v -eq 1 ]; then
 #       echo
 #       exit 1
 #    fi
-    s2vStr="-k $s2v_num -K $subjdir/dti/sorder.txt"
-    s2vStrQC="-s $subjdir/dti/sorder.txt"
+    s2vStr="-k $s2v_num -K $subjdir/dwi/sorder.txt"
+    s2vStrQC="-s $subjdir/dwi/sorder.txt"
 fi
 
 # Estimating susceptibility-by-movement in eddy?
@@ -154,65 +155,134 @@ fi
 ### Run required steps.
 
 # Check acqparams exist.
-if [ ! -f $subjdir/dti/acqparams.txt ]; then
+if [ ! -f $subjdir/dwi/acqparams.txt ]; then
   echo
   echo "$(basename $0): ERROR: Acquisition parameters files is required to run this pipeline."
-  echo "Make sure this file exists: $subjdir/dti/acqparams.txt."
+  echo "Make sure this file exists: $subjdir/dwi/acqparams.txt."
   echo
   exit 1
 fi
 
-mask=$subjdir/dti/${subj}_topup_b0_brain_mask.nii.gz
+mask=$subjdir/dwi/${subj}_topup_b0_brain_mask.nii.gz
 
 # fda_preproc
-[ $fda_prep -eq 1 ] && run_fda_preproc $subjdir/dti
+[ $fda_prep -eq 1 ] && run_fda_preproc $subjdir/dwi
+
+# synb0 if required
+if [ $synb0Opt -eq 1 ]; then
+  if [ -f $subjdir/dwi/synb0/OUTPUTS/b0_u.nii.gz ]; then
+    echo "Found SynB0-DISCO output. Skipping..."
+  else
+    fsLicense=$(find $FREESURFER -maxdepth 1 -name "*license*")
+    t1w=$subjdir/anat/${subj}_T1w.nii.gz
+    t1wb=$subjdir/anat/${subj}_T1w_brain.nii.gz
+    if [ -f "$t1wb" ]; then
+      synb0stripped="--stripped"
+      t1w=$t1wb
+    elif [ -f "$t1w" ]; then
+      synb0stripped=""
+    else
+      echo "$(basename $0): ERROR: T1w image required for SynB0-DISCO pipeline."
+      exit 1
+    fi
+    synb0Dir=$subjdir/dwi/synb0
+    mkdir -p $synb0Dir/{INPUTS,OUTPUTS}
+    dwiFile=$(find $subjdir/dwi -maxdepth 1 -name "*.nii.gz" ! -name "*_mask*")
+    if [ $(echo "$dwiFile" | wc -l ) -ne 1 ]; then
+      echo "$(basename $0): ERROR: Found more than one .nii.gz file in the dwi directory."
+      exit 1
+    fi
+    fslroi $dwiFile $synb0Dir/INPUTS/b0.nii.gz 0 1
+    cp $subjdir/dwi/acqparams.txt $synb0Dir/INPUTS
+    echo "0 1 0 0.000" >> $synb0Dir/INPUTS/acqparams.txt
+    cp $t1w $synb0Dir/INPUTS/T1.nii.gz
+    docker run --rm \
+      -v $synb0Dir/INPUTS/:/INPUTS/ \
+      -v $synb0Dir/OUTPUTS:/OUTPUTS/ \
+      -v ${fsLicense}:/extra/freesurfer/license.txt \
+      --user $(id -u):$(id -g) \
+      leonyichencai/synb0-disco:v3.0 \
+      --notopup \
+      $synb0stripped
+    prepeddyindex ${dwiFile%.nii.gz}.bval -o $subjdir/dwi/index.txt -s
+    cp $synb0Dir/INPUTS/acqparams.txt $subjdir/dwi
+  fi
+  numb0=1
+  intScal=0
+fi
 
 # prepare_4_topup
-[ $prep -eq 1 ] && prepare_4_topup $subjdir/dti $numb0 $subj $intScal
+if [ $prep -eq 1 ]; then
+  if [ $synb0Opt -eq 1 ]; then
+    mkdir $subjdir/dwi/topup
+    fslmerge -t $subjdir/dwi/topup/${subj}_b0s_4_topup $subjdir/dwi/synb0/OUTPUTS/b0_d_smooth  $subjdir/dwi/synb0/OUTPUTS/b0_u
+  else
+    prepare_4_topup $subjdir/dwi $numb0 $subj $intScal
+  fi
+fi
 
 # run_topup
 [ $topup -eq 1 ] && run_topup -d $subjdir -i ${subj}_b0s_4_topup -o ${subj}_topup
 
 # optibet b0 mask
 if [ $optimask -eq 1 ]; then
-  rm $subjdir/dti/topup/${subj}_topup_b0_brain_mask.nii.gz $mask
-  nbl_optibet_b0_ants -i $subjdir/dti/topup/${subj}_topup_b0_mean.nii.gz -o $subjdir/dti/topup/${subj}_topup_b0_brain_mask.nii.gz
-  cp $subjdir/dti/topup/${subj}_topup_b0_brain_mask.nii.gz $mask
+  rm $subjdir/dwi/topup/${subj}_topup_b0_brain_mask.nii.gz $mask
+  nbl_optibet_b0_ants -i $subjdir/dwi/topup/${subj}_topup_b0_mean.nii.gz -o $subjdir/dwi/topup/${subj}_topup_b0_brain_mask.nii.gz
+  cp $subjdir/dwi/topup/${subj}_topup_b0_brain_mask.nii.gz $mask
 fi
 
 # run_eddy
 if [ $eddy -eq 1 ]; then
-
-    # half-sphere
-    if [ "$slmStr" == "" ]; then
-      [ $(check_bvecs $subjdir/dti/${subj}_all.bvec 1) -eq 0 ] && slmStr="-h"
+  if [ $synb0Opt -eq 1 ]; then
+    dwiFile=$(find $subjdir/dwi -maxdepth 1 -name "*.nii.gz" ! -name "*mask*")
+    if [ $(echo "$dwiFile" | wc -l ) -ne 1 ]; then
+      echo "$(basename $0): ERROR: Found more than one .nii.gz file in the dwi directory."
+      exit 1
     fi
-    
-    # run
+    if [ "$slmStr" == "" ]; then
+      [ $(check_bvecs ${dwiFile%.nii.gz}.bvec 1) -eq 0 ] && slmStr="-h"
+    fi
+    run_eddy -d $subjdir -i $(basename $dwiFile) -m $mask -o ${subj}_MPN_GR_E_TU -t ${subj}_topup -r $cudaStr $s2vStr $slmStr $stdStr $sxmStr $furtherFlag "$furtherStr"
+  else
+    if [ "$slmStr" == "" ]; then
+      [ $(check_bvecs $subjdir/dwi/${subj}_all.bvec 1) -eq 0 ] && slmStr="-h"
+    fi
     run_eddy -d $subjdir -i ${subj}_all -m $mask -o ${subj}_MPN_GR_E_TU -t ${subj}_topup -r $cudaStr $s2vStr $slmStr $stdStr $sxmStr $furtherFlag "$furtherStr"
-
+  fi
 fi
 
 # eddy_quad
 if [ $doQC -eq 1 ]; then
     echo "Running QC..."
+    eddyLog="$subjdir/dwi/eddy/run_eddy.log"
+    eddyOut=$(grep -e '--out=' $eddyLog | sed 's/--out=//g')
+    bvalFile=$(grep -e '--bvals=' $eddyLog | sed 's/--bvals=//g')
+    bvecFile=$(grep -e '--bvecs=' $eddyLog | sed 's/--bvecs=//g')
+    maskFile=$(grep -e '--mask=' $eddyLog | sed 's/--mask=//g')
+    s2vFile=$(grep -e '--slspec=' $eddyLog | sed 's/--slspec=//g')
+    if [ "$s2vFile" == "" ]; then
+      s2vQCOpt=""
+    else
+      s2vQCOpt=" -s $subjdir/dwi/$(basename $s2vFile)"
+    fi
     eddy_quad \
-      $subjdir/dti/eddy/${subj}_MPN_GR_E_TU \
-      -idx $subjdir/dti/index.txt \
-      -par $subjdir/dti/acqparams.txt \
-      -m $mask \
-      -b $subjdir/dti/${subj}_all.bval \
-      -g $subjdir/dti/${subj}_all.bvec \
-      $s2vStrQC
+      $subjdir/dwi/eddy/$(basename $eddyOut) \
+      -idx $subjdir/dwi/index.txt \
+      -par $subjdir/dwi/acqparams.txt \
+      -m $subjdir/dwi/$(basename $maskFile) \
+      -b $subjdir/dwi/$(basename $bvalFile) \
+      -g $subjdir/dwi/$(basename $bvecFile) \
+      -v \
+      $s2vQCOpt
     echo
 fi
 
 # el_reorder + copy brain mask for each shell
 if [ $reord -eq 1 ]; then
-    el_reorder $subjdir/dti/eddy/${subj}_MPN_GR_E_TU
-    for f in $(find $subjdir/dti/eddy/SORTED/ -type f -name "*_data*.nii.gz"); do
+    el_reorder $subjdir/dwi/eddy/${subj}_MPN_GR_E_TU
+    for f in $(find $subjdir/dwi/eddy/SORTED/ -type f -name "*_data*.nii.gz"); do
         n=${f%.nii.gz}
-        fslmaths $subjdir/dti/${subj}_topup_b0_brain_mask -ero ${n}_mask
+        fslmaths $subjdir/dwi/${subj}_topup_b0_brain_mask -ero ${n}_mask
     done
 fi
 

@@ -1,0 +1,472 @@
+#!/bin/bash
+
+##################################
+# Ahmad Beyh                     #
+# Francisco De Santiago Requejo  #
+# NatBrainLab                    #
+# ID: el_reorder.sh              #
+# Version: 20190121              #
+##################################
+
+usage () {
+cat << EOF
+
+************
+Usage
+  $(basename $0) <input_nifti> [options]
+
+Reorders the input DWI series according to the b-values specified in
+the input bval file. By default, the output will be one new nifti for
+every shell in the input (reorder and split). You can also set the 
+option to output one file only (reorder without splitting). The output
+bval/bvec files will be saved under the same name of the output nifti.
+All B0s will be exported at the beginning of every output file.
+
+Required
+  input_nifti ....... NIfTI (.nii or .nii.gz) file to be reordered.
+
+Optional
+  -b <bval> ....... Path to bval file (default = input_nifti.bval).
+  -v <bvec> ....... Path to bvec file (default = input_nifti.bvec).
+  -n .............. Do not split shells in output.
+  -o <basename> ... Basename for output (default = name of input nifti). 
+                    If -n is not set, the b-value will be appended to 
+                    this name for each shell. Otherwise, "_sorted" will
+                    be appended to the output name.
+                    All output files will be saved in a new directory 
+                    called SORTED at the location of the input nifti.
+
+Examples
+  $(basename $0) ~/data/subject_01_DWI.nii.gz
+  $(basename $0) ~/data/subject_01_DWI.nii.gz -n -o subject_01
+************
+
+EOF
+exit 1
+}
+
+[ $# -eq 0 ] && usage
+
+
+#=====================
+# CHECK INPUT OPTIONS
+#=====================
+
+datadir=$(cd $(dirname $1) && pwd)
+DWI=$datadir/$(basename $1)
+shift 1
+
+# NOTE: bval and bvec names are defined after checking the DWI
+
+bvalIn=
+bvecIn=
+noSplit=0
+outIn=
+
+while [[ $# -gt 0 ]]; do
+  flag="$1"
+  case $flag in
+    -b) bvalIn="$2" ; shift 2 ;;
+    -v) bvecIn="$2" ; shift 2 ;;
+    -n) noSplit=1   ; shift   ;;
+    -o) outIn="$2"  ; shift 2 ;;
+    -h|--h|-help|--help) usage;;
+    *) echo "$(basename $0): ERROR: bad input."; exit 1;;
+  esac
+done
+
+
+#=================
+# SETUP VARIABLES
+#=================
+
+# datadir
+
+if [ ! -d $datadir ]; then
+  echo ""
+  echo " $(basename $0): ERROR: could not find directory $datadir"
+  echo ""
+  exit 1
+fi
+
+datadir=$(cd $datadir && pwd)
+
+#cd $datadir #<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+
+# DWI
+
+[ "${DWI: -4}" == ".nii" ] && DWI=${DWI::${#DWI}-4}
+[ "${DWI: -7}" == ".nii.gz" ] && DWI=${DWI::${#DWI}-7}
+
+if [ -f ${DWI}.nii ]; then
+  DWI_name=${DWI}.nii
+elif [ -f ${DWI}.nii.gz ]; then
+  DWI_name=${DWI}.nii.gz
+else
+  echo -e '\n' $(basename $0)': could not find a DWI called' ${DWI}'.nii or' ${DWI}'.nii.gz \n'
+  exit 1
+fi
+
+
+# bvals & bvecs
+
+if [ "$bvalIn" == "" ]; then
+  if [ -f ${DWI}.bval ]; then
+    bval=${DWI}.bval
+  elif [ -f ${DWI}.bvals ]; then
+    bval=${DWI}.bvals
+  else
+    echo -e '\n' $(basename $0)': could not find a BVAL file called' ${DWI}'.bval or' ${DWI}'.bvals \n'
+    exit 1
+  fi
+else
+  bval="$(cd $(dirname $bvalIn) && pwd)/$(basename $bvalIn)"
+fi
+
+if [ "$bvecIn" == "" ]; then
+  if [ -f ${DWI}.bvec ]; then
+    bvec=${DWI}.bvec
+  elif [ -f ${DWI}.bvecs ]; then
+    bvec=${DWI}.bvecs
+  else
+    echo -e '\n' $(basename $0)': could not find a BVEC file called' ${DWI}'.bvec or' ${DWI}'.bvecs \n'
+    exit 1
+  fi
+else
+  bvec="$(cd $(dirname $bvecIn) && pwd)/$(basename $bvecIn)"
+fi
+
+
+# output basename
+
+if [ "$outIn" != "" ]; then
+  outName=$(basename $outIn)
+else
+  outName=$(basename $DWI)
+fi
+
+[ "${outName: -4}" == ".nii" ] && outName=${outName::${#outName}-4}
+[ "${outName: -7}" == ".nii.gz" ] && outName=${outName::${#outName}-7}
+
+
+# use /dev/shm if available, improves speed
+
+eldir=${datadir}/SORTED
+mkdir -p $eldir
+
+if [ -d /dev/shm ]; then
+  avail_ram=$(df --block-size=1M /dev/shm | awk 'FNR == 2 {print $4}')
+  size_DWI=$(du --block-size=1M $DWI_name | awk '{print $1}')
+  if [ "$(echo "($avail_ram / $size_DWI) > 1.3" | bc)" == "1" ]; then
+    ramdir="/dev/shm/${outName}_el_reorder_tmp"
+    #echo " *** Using /dev/shm ***"
+  fi
+else
+  ramdir=$eldir
+fi
+
+cd $eldir
+
+
+# check that input data make sense
+numVolsNii=$(fslval $DWI dim4)
+numVolsBval=$(cat $bval | wc -w)
+numVolsBvec=$(echo "$(cat $bvec | wc -w) / 3" | bc)
+numLinesBval=$(awk 'END{print NR}' $bval) # awk handles missing new line character
+numLinesBvec=$(awk 'END{print NR}' $bvec) # awk handles missing new line character
+
+badData() {
+cat << EOF
+
+$(basename $0): ERROR: $1
+
+EOF
+exit 1
+}
+
+if [ $numVolsNii -eq 1 ]; then
+  badData "Input NIfTI is 3D. Nothing to do here."
+elif [ $numVolsNii -ne $numVolsBval -o $numVolsNii -ne $numVolsBvec ]; then
+  badData "Mismatch in number of volumes between input files."
+elif [ $numLinesBval -ne 1 ]; then
+  badData "Bval must be a single line."
+elif [ $numLinesBvec -ne 3 ]; then
+  badData "Bvec must be 3 lines."
+fi
+
+
+# display message before starting
+
+cat << EOF
+
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+ $(basename $0)
+ Started: $(date)
+
+   Data directory ....... $datadir
+   DWI file ............. $DWI_name
+   Bval file ............ $bval
+   Bvec file ............ $bvec
+   Output basename ...... $outName
+
+EOF
+
+
+#=======================
+# SET UP CLEANER & TRAP
+#=======================
+
+# this function removes temporary files created by the script
+# and, if using /dev/shm later, removes anything created there
+
+clean() {
+for f in ${eldir}/${outName}_el_temp*; do
+  [ -e "$f" ] && rm ${outName}_el_temp_*
+  break
+done
+
+if [ -d $ramdir ] && [ "$ramdir" != "$eldir" ];then
+  rm -r $ramdir
+fi
+}
+
+clean
+
+# the trap is to make sure all temporary files
+# are removed if the user sends a kill signal
+trap clean INT QUIT TERM EXIT
+
+mkdir -p $ramdir
+
+
+#===========================================
+# GET SORTED BVALS AND SEPARATE INTO SHELLS
+#===========================================
+
+echo -ne ' Analysing data...\r'
+
+# display message about decimals & exponents, if any
+if [ $(grep "\." $bval | wc -l) -ne 0 ] || [ $(grep e $bval | wc -l) -ne 0 ]; then
+  echo -e ' Analysing data...\n Bval contains decimals and/or exponents. Converting to integers in output.'
+fi
+
+# load bval as array
+Arrbval=($(cat $bval))
+
+# remove decimals and exponents from bval array
+for i in ${!Arrbval[@]}; do
+  Arrbval[i]=$(echo ${Arrbval[i]} | awk '{print $1+0}' |  awk -F . '{print $1}')
+done
+
+# transpose bval, sort, and remove decimals and exponents
+sed "s/\s/\n/g" $bval | grep "." | awk '{print $1+0}' | awk -F . '{print $1}' | sort -n > ${outName}_el_temp_bval_sorted
+
+# variable val will be the smallest b-value
+val=$(cat ${outName}_el_temp_bval_sorted | head -1)
+
+# set-up an array which will contain the smallest value of each shell (starts with the smallest shell now)
+Arrshells=($val)
+
+# scan sorted bval and update the shells array with any new shells found
+for x in $(cat ${outName}_el_temp_bval_sorted); do
+  if [ $x -gt $((val+300)) ]; then
+    val=$x
+    Arrshells+=($x)
+  fi
+done
+
+# create variable to calculate average value in each shell later
+avgs=""
+
+# for each shell in the shells array, find the values in the bval
+# that correspond to that shell and note their positions (indices) 
+
+for ishell in ${!Arrshells[@]}; do
+  shell=${Arrshells[$ishell]}
+  sum=""
+  cnt=0
+
+  for i in ${!Arrbval[@]}; do
+    if [ ${Arrbval[$i]} -lt $((shell+300)) -a ${Arrbval[$i]} -ge $shell ]; then
+      cnt=$((cnt+1))
+      if [ "$cnt" == "1" ]; then
+        sum=${Arrbval[$i]}
+        idx=$i
+        idx4=$(printf "%04d" $i)
+      else
+        sum=$sum" + "${Arrbval[$i]}
+        idx=$idx" "$i
+        idx4=$idx4" "$(printf "%04d" $i)
+      fi
+    fi
+  done
+
+  echo $idx > ${outName}_el_temp_index_shell${ishell}
+  echo $idx4 > ${outName}_el_temp_index4_shell${ishell}
+  avgs=$avgs" "$(echo "($sum)/$cnt" | bc)
+done
+
+echo -e ' Analysing data...done'
+echo -e ' Found' ${#Arrshells[@]} 'shells with minimum values: '${Arrshells[@]}
+
+
+#==============================================
+# SEPARATE DWI AND CONCATENATE BASED ON SHELLS
+#==============================================
+
+echo -ne ' Separating DWI images...\r'
+
+# split volumes into $eldir (called as $ramdir in this part)
+fslsplit $DWI ${ramdir}/${outName}_el_temp_vols
+
+echo -e ' Separating DWI images...done'
+if [ $noSplit -eq 0 ]; then
+  echo -e ' Concatenating DWIs for each non-zero shell...'
+else
+  echo -ne ' Concatenating DWIs for all shells...\r'
+fi
+#echo -ne ' Concatenating DWIs for each non-zero shell...\r'
+
+# for each shell, concatenate all the zero shell volumes
+# followed by all the volumes corresponding to that shell.
+# If noSplit is being used, concatenate all volumes by order
+# of increasing b-value.
+
+if [ $noSplit -eq 0 ]; then
+  for ishell in ${!Arrshells[@]}; do
+    { # BEGIN MINI CODE BLOCK FOR MERGING IN PARALLEL     <------------
+    shell=${Arrshells[$ishell]}
+    if [ $ishell -ne 0 ]; then
+      paste -d ' ' ${outName}_el_temp_index_shell0 ${outName}_el_temp_index_shell${ishell} > ${outName}_el_temp_all_index_shell${ishell}
+      paste -d ' ' ${outName}_el_temp_index4_shell0 ${outName}_el_temp_index4_shell${ishell} > ${outName}_el_temp_all_index4_shell${ishell}
+      timepoints=""
+      for index in $(cat ${outName}_el_temp_all_index4_shell${ishell}); do
+        timepoints=$timepoints" "${ramdir}/${outName}_el_temp_vols${index}.nii.gz
+      done
+      fslmerge -t ${outName}_data${shell} $timepoints
+      echo " Shell $shell done"
+    fi
+    } & # END OF MINI CODE BLOCK                          <------------
+  done
+else
+  timepoints=""
+  indices=""
+  for ishell in ${!Arrshells[@]}; do
+    shell=${Arrshells[$ishell]}
+    for index in $(cat ${outName}_el_temp_index4_shell${ishell}); do
+      timepoints=$timepoints" "${ramdir}/${outName}_el_temp_vols${index}.nii.gz
+    done
+    for index in $(cat ${outName}_el_temp_index_shell${ishell}); do
+      indices="$indices $index"
+    done
+  done
+  fslmerge -t ${outName}_sorted $timepoints
+  echo " Concatenating DWIs for all shells...done"
+fi
+
+wait # don't go further until all merging is done
+
+# delete all the single volumes from fslsplit
+#rm $timepoints
+rm ${ramdir}/${outName}_el_temp_vols*.nii.gz
+
+#echo -e ' Concatenating DWIs for each non-zero shell...done'
+
+
+#===============================
+# MAKE BVAL FILE FOR EACH SHELL
+#===============================
+
+echo -ne ' Sorting bvals and bvecs...\r'
+
+# for each shell, use the indices defined earlier
+# to select columns from the bval for that shell
+
+if [ $noSplit -eq 0 ]; then
+  for ishell in ${!Arrshells[@]}; do
+    shell=${Arrshells[$ishell]}
+    
+    # remove bval for that shell if it already exists
+    [ -f ${outName}_data${shell}.bval ] && rm ${outName}_data${shell}.bval
+    
+    # run only for non-zero shells
+    if [ $ishell -ne 0 ]; then
+      for i in $(cat ${outName}_el_temp_all_index_shell${ishell}); do
+        j=$((i+1))  # increment the index by 1 for awk, so now it starts at 1 not 0
+        echo -n "$(cat $bval | awk '{print $'$j'}') " >> ${outName}_data${shell}.bval
+      done
+      echo "" >> ${outName}_data${shell}.bval
+    fi
+  done
+else
+  [ -f ${outName}_sorted.bval ] && rm ${outName}_sorted.bval
+  for ishell in ${!Arrshells[@]}; do
+    for i in $(cat ${outName}_el_temp_index_shell${ishell}); do
+      j=$((i+1))  # increment the index by 1 for awk, so now it starts at 1 not 0
+      echo -n "$(cat $bval | awk '{print $'$j'}') " >> ${outName}_sorted.bval
+    done
+  done
+  echo "" >> ${outName}_sorted.bval
+fi
+
+
+#===============================
+# MAKE BVEC FILE FOR EACH SHELL
+#===============================
+
+# for each shell, use the indices defined earlier
+# to select columns from the bvec for that shell
+
+if [ $noSplit -eq 0 ]; then
+  for ishell in ${!Arrshells[@]}; do
+    shell=${Arrshells[$ishell]}
+  
+    # run only for non-zero shells
+    if [ $ishell -ne 0 ]; then
+  
+      # this will create an empty bvec file (replaces any existing file)
+      echo -e '\n\n' > ${outName}_data${shell}.bvec
+  
+      for i in $(cat ${outName}_el_temp_all_index_shell${ishell}); do
+        j=$((i+1)) # increment the index by 1 for awk, so now it starts at 1 not 0
+        newbvec=$(< ${outName}_data${shell}.bvec)
+        paste -d ' ' - <(echo "$(cat $bvec | awk '{print $'$j'}') ") > ${outName}_data${shell}.bvec <<< "$newbvec"
+      done
+    fi
+  done
+else
+  # this will create an empty bvec file (replaces any existing file)
+  echo -e '\n\n' > ${outName}_sorted.bvec
+    
+  for ishell in ${!Arrshells[@]}; do
+    shell=${Arrshells[$ishell]}
+    
+    for i in $(cat ${outName}_el_temp_index_shell${ishell}); do
+      j=$((i+1)) # increment the index by 1 for awk, so now it starts at 1 not 0
+      newbvec=$(< ${outName}_sorted.bvec)
+      paste -d ' ' - <(echo "$(cat $bvec | awk '{print $'$j'}') ") > ${outName}_sorted.bvec <<< "$newbvec"
+    done
+  done
+fi
+
+echo -e ' Sorting bvals and bvecs...done'
+
+
+#==========
+# CLEAN-UP
+#==========
+
+# remove all temporary files
+clean
+
+echo ""
+echo " Finished: "$(date)
+echo "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
+echo ""
+
+
+###########
+# THE END #
+###########
+

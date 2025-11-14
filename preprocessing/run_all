@@ -157,22 +157,22 @@ fi
 [ $fda_prep -eq 1 ] && run_fda_preproc $subjdir/dti
 
 # run_eddy
-mask=$subjdir/dti/${subj}_MPN_GR_mask.nii.gz
+mask=$subjdir/dti/${subj}_DWI_MPN_GR_mask.nii.gz
 if [ $eddy -eq 1 ]; then
     
     # mask
     if [ ! -f $mask ]; then
         if [ $optimask -eq 1 ]; then
-            nbl_optibet_b0_ants -i $subjdir/dti/${subj}_MPN_GR.nii.gz -o $mask
+            nbl_optibet_b0_ants -i $subjdir/dti/${subj}_DWI_MPN_GR.nii.gz -o $mask
         else
-            bet $subjdir/dti/${subj}_MPN_GR $subjdir/dti/${subj}_MPN_GR_brain -n -m -f 0.35
-            mv $subjdir/dti/${subj}_MPN_GR_brain_mask.nii.gz $mask
+            bet $subjdir/dti/${subj}_DWI_MPN_GR $subjdir/dti/${subj}_DWI_MPN_GR_brain -n -m -f 0.35
+            mv $subjdir/dti/${subj}_DWI_MPN_GR_brain_mask.nii.gz $mask
         fi
     fi
     
     # index
     if [ ! -f $subjdir/dti/index.txt ]; then
-        prepeddyindex $subjdir/dti/${subj}_MPN_GR.bval -s
+        prepeddyindex $subjdir/dti/${subj}_DWI_MPN_GR.bval -s
     fi
     
     # acqparams
@@ -182,26 +182,26 @@ if [ $eddy -eq 1 ]; then
     
     # half-sphere
     if [ "$slmStr" == "" ]; then
-      [ $(check_bvecs $subjdir/dti/${subj}_MPN_GR.bvec 1) -eq 0 ] && slmStr="-h"
+      [ $(check_bvecs $subjdir/dti/${subj}_DWI_MPN_GR.bvec 1) -eq 0 ] && slmStr="-h"
     fi
     
     # run
-    run_eddy -d $subjdir -i ${subj}_MPN_GR -o ${subj}_MPN_GR_E -r $cudaStr $s2vStr $slmStr $stdStr $furtherFlag "$furtherStr"
+    run_eddy -d $subjdir -i ${subj}_DWI_MPN_GR -o ${subj}_DWI_MPN_GR_E -r $cudaStr $s2vStr $slmStr $stdStr $furtherFlag "$furtherStr"
     
     # copy mask to eddy directory
-    cp $mask $subjdir/dti/eddy/${subj}_MPN_GR_E_mask.nii.gz
+    cp $mask $subjdir/dti/eddy/${subj}_DWI_MPN_GR_E_mask.nii.gz
 fi
 
 # eddy_quad
 if [ $doQC -eq 1 ]; then
     echo "Running QC..."
     eddy_quad \
-      $subjdir/dti/eddy/${subj}_MPN_GR_E \
+      $subjdir/dti/eddy/${subj}_DWI_MPN_GR_E \
       -idx $subjdir/dti/index.txt \
       -par $subjdir/dti/acqparams.txt \
       -m $mask \
-      -b $subjdir/dti/${subj}_MPN_GR.bval \
-      -g $subjdir/dti/${subj}_MPN_GR.bvec \
+      -b $subjdir/dti/${subj}_DWI_MPN_GR.bval \
+      -g $subjdir/dti/${subj}_DWI_MPN_GR.bvec \
       $s2vStrQC
     echo
 fi
@@ -222,7 +222,7 @@ if [ $unwarp -eq 1 ]; then
     fi
     
     ap=$subjdir/ap/${subj}_AP.nii.gz
-    dwi=$subjdir/dti/eddy/${subj}_MPN_GR_E.nii.gz
+    dwi=$subjdir/dti/eddy/${subj}_DWI_MPN_GR_E.nii.gz
     
     mkdir -p $subjdir/ap
     
@@ -236,11 +236,11 @@ if [ $unwarp -eq 1 ]; then
       -maps
     
     flirt_apply_eye \
-      $subjdir/dti/eddy/${subj}_MPN_GR_E/${subj}_MPN_GR_E_HARDI_AP6np.nii \
+      $subjdir/dti/eddy/${subj}_DWI_MPN_GR_E/${subj}_DWI_MPN_GR_E_HARDI_AP6np.nii \
       $subjdir/ap/img_hdr_ref \
       $ap
     
-    rm -r $subjdir/dti/eddy/${subj}_MPN_GR_E/
+    rm -r $subjdir/dti/eddy/${subj}_DWI_MPN_GR_E/
     
     vox=$(echo -e $(fslval $dwi pixdim1) '\n' $(fslval $dwi pixdim2) '\n' $(fslval $dwi pixdim3) | sort -n | head -1)
     vox=$(printf "%0.2f" $vox)
@@ -273,7 +273,7 @@ fi
 # el_reorder
 if [ $reord -eq 1 ]; then
     
-    dwi=$subjdir/dti/eddy/${subj}_MPN_GR_E
+    dwi=$subjdir/dti/eddy/${subj}_DWI_MPN_GR_E
     [ $unwarp -eq 1 ] && dwi=${dwi}_EPI
     
     el_reorder $dwi

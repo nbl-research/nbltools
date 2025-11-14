@@ -1,0 +1,234 @@
+#!/bin/bash
+
+##################################
+# Ahmad Beyh | NatBrainLab       #
+# ID: run_fda_preproc            #
+# Version: 20240309              #
+##################################
+
+usage() {
+cat << EOF
+
+Usage
+  $(basename $0) <data_directory> [options]
+
+Options
+  -n <0/1> .... Apply MP denoising.
+                Default = 1.
+  -s <0/1> .... Estimate noise map ('full' MP denoising).
+                Default = 1.
+  -g <val> .... Apply Gibbs ringing correction.
+                If val = 0 ....... no correction is applied.
+                If val = 0.875 ... set partial Fourier to 87.5% (7/8)..
+                If val = 0.75 .... set partial Fourier to 75% (6/8).
+                If val = 1 ....... set partial Furier to 100%.
+                Default = 1 and no other values are currently accepted.
+
+EOF
+exit 1
+}
+
+[ $# -lt 1 -o $# -gt 7 ] && usage
+
+logopts="$@"
+dir=$(cd $1 && pwd)
+shift
+cd $dir
+logfile=$dir/$(basename $0).$(date +%Y%m%d.%H%M%S).log
+
+# Set defaults.
+noise=1
+denoised=0
+sigma=1
+gibbs=1
+unringed=0
+
+# Parse options.
+while getopts :n:s:g: opt
+do
+  case $opt in
+    n) noise=$OPTARG ;;
+    s) sigma=$OPTARG ;;
+    g) gibbs=$OPTARG ;;
+    *) echo ""; echo " $(basename $0): ERROR: Invalid option -$OPTARG"; echo ""; exit 1;;
+  esac
+done
+
+{ #BEGIN CODE BLOCK FOR REDIRECTION
+
+# Display begin message.
+cat << EOF
+
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+$(date)
+$(basename $0) $logopts
+
+EOF
+
+
+if [ "$gibbs" != "0" -a "$gibbs" != "1" -a "$gibbs" != "0.875" -a "$gibbs" != "0.75" ]; then
+  echo $(basename $0): ERROR: partial Fourier value not supported.
+  exit 1
+fi
+
+# If TORTOISE is installed, use the DwiDenoise and Gibbs binaries.
+# Alternatively, check for the TORTOISE docker and use the same binaries.
+# These are the Veraart and Kellner functions implemented in C.
+# If not available, quit with an error. 
+
+foundTortoiseBin=0
+foundTortoiseDocker=0
+
+which DWIDenoise &>/dev/null
+exitStat=$(echo $?)
+if [ "$exitStat" == "0" ]; then
+  foundTortoiseBin=1
+  echo $(basename $0): Found TORTOISE binaries.
+else
+  docker image inspect eurotomania/tortoise &>/dev/null
+  exitStat=$(echo $?)
+  if [ "$exitStat" == "0" ]; then
+    foundTortoiseDocker=1
+    echo $(basename $0): Found TORTOISE Docker.
+  fi
+fi
+
+if [ "$foundTortoiseBin" == "0" -a "$foundTortoiseDocker" == "0" ]; then
+  echo
+  echo $(basename $0): ERROR: Could not find TORTOISE binaries or Docker installation.
+  echo Cannot apply DWIDenoise or UnRing.
+  echo
+  exit 1
+fi
+
+
+# Gunzip.
+if [ $(ls *.nii.gz 2>/dev/null | wc -l) -ne 0 ]; then
+  echo "Uncompressing NIfTI files..."
+  gunzip *.nii.gz
+fi
+origNiis=$(find . -maxdepth 1 -type f -name "*.nii" ! -name "*mask.nii" | sort)
+
+
+if [ "$foundTortoiseBin" == "1" ]; then
+  
+  binPath=$(dirname $(which DWIDenoise))
+  dnCmd="$binPath/DWIDenoise"
+  dnOpt="9"
+  dnOptDesc="(window size = $dnOpt)"
+
+  if [ "$noise" == "1" ]; then
+    for nii in $origNiis; do
+      if [ $(fslval $nii dim4) -gt 2 ]; then
+        echo
+        echo "Denoising $nii ..."
+	echo "Using $dnCmd $dnOptDesc"
+        "$dnCmd" $nii ${nii%.nii}_MPN.nii ${nii%.nii}_MPN_noise_map.nii $dnOpt
+      else
+        cp $nii ${nii%.nii}_MPN.nii
+      fi
+    done
+    noise=0
+    sigma=0
+    denoised=1
+  fi
+  
+  if [ "$gibbs" != "0" ]; then
+    if [ "$denoised" == "1" ]; then
+      niis4unring=$(ls *MPN.nii)
+    else
+      niis4unring=$(ls *.nii)
+    fi
+    for nii in $niis4unring; do
+      echo
+      echo "UnRinging $nii ..."
+      $binPath/Gibbs $nii ${nii%.nii}_GR.nii 20 1 3
+    done
+    gibbs=0
+    unringed=1
+  fi
+
+elif [ "$foundTortoiseDocker" == "1" ]; then
+  
+  dockerCmd="docker run --rm -v $(pwd):/mydatadrive eurotomania/tortoise "
+
+  dnCmd="$dockerCmd DWIDenoise "
+  dnOpt="9"
+  dnOptDesc="(window size = $dnOpt)"
+
+  if [ "$noise" == "1" ]; then
+    for nii in $origNiis; do
+      if [ $(fslval $nii dim4) -gt 2 ]; then
+        echo
+        echo "Denoising $nii ..."
+	echo "Using $dnCmd $dnOptDesc"
+        $dnCmd /mydatadrive/$(basename $nii) /mydatadrive/$(basename ${nii%.nii})_MPN.nii /mydatadrive/$(basename ${nii%.nii})_MPN_noise_map.nii $dnOpt
+      else
+        cp $nii ${nii%.nii}_MPN.nii
+      fi
+    done
+    noise=0
+    sigma=0
+    denoised=1
+  fi
+  
+  if [ "$gibbs" != "0" ]; then
+    if [ "$denoised" == "1" ]; then
+      niis4unring=$(ls *MPN.nii)
+    else
+      niis4unring=$(ls *.nii)
+    fi
+    for nii in $niis4unring; do
+      echo
+      echo "UnRinging $nii ..."
+      $dockerCmd Gibbs /mydatadrive/$nii /mydatadrive/${nii%.nii}_GR.nii $gibbs 1
+    done
+    gibbs=0
+    unringed=1
+  fi
+
+fi
+
+
+
+echo
+
+# Gzip.
+echo "Compressing NIfTI files..."
+gzip *nii
+
+# Set the suffix added to the name of the file according to which options were chosen.
+# NOTE: order of if statements below is important
+suff=
+[ "$noise" == "1" ] || [ "$denoised" == "1" ] && suff="${suff}_MPN"
+[ "$gibbs" == "1" ] || [ "$unringed" == "1" ] && suff="${suff}_GR"
+
+# Create directory where all output will be moved,
+# then move final niftis back here and copy the
+# bval and bvec with new names.
+newdir=fda_preproc
+mkdir $newdir
+mv *nii.gz *bval *bvec $newdir 
+mv $newdir/*${suff}.nii.gz .
+for f in $origNiis; do
+  n=${f%.nii}
+  cp $newdir/${n}.bval ${n}${suff}.bval
+  cp $newdir/${n}.bvec ${n}${suff}.bvec
+  if [ -f ${n}.json ]; then
+    mv ${n}.json $newdir
+    cp $newdir/${n}.json ${n}${suff}.json
+  fi
+done
+
+# Display finish message.
+cat << EOF
+
+Finished
+$(date)
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+EOF
+
+} | tee "$logfile"
+#END OF CODE BLOCK
+

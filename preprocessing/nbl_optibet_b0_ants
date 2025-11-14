@@ -24,7 +24,7 @@ If REFDIR is specified, and for example is called TEMPLATE, then the used files 
   TEMPLATE/TEMPLATE_MASK.nii.gz
 
 Default REFDIR is:
-  ~/git/nbltools/data/REF/BRCATLASC_B0_TEMPLATE_2MM/
+  /opt/nbl/data/REF/BRCATLASC_B0_TEMPLATE_2MM/
 
 **********
 

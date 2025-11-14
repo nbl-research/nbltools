@@ -97,7 +97,7 @@ done
 if [ ! -z ${cuda+x} ]; then
   eddyCmd="eddy_cuda"
 else
-  eddyCmd="eddy_cpu --nthr=$OMP_NUM_THREADS"
+  eddyCmd="eddy_cpu --nthr=$(nproc)"
 fi
 
 ### datadir
@@ -311,9 +311,14 @@ echo -e '\nRunning eddy...\n------------------------------\n'
 
 $eddyCmd
 
-echo -e '\n------------------------------\nRunning eddy...done'
+eddyStat=$(echo $?)
 
-
+if [ $eddyStat -eq 0 ]; then
+  echo -e '\n------------------------------\nRunning eddy...done'
+else
+  echo -e '\n------------------------------\nRunning eddy...ERROR'
+  exit 2
+fi
 
 #==========================
 # RENAMING BVALS AND BVECS
@@ -326,6 +331,7 @@ cp ${datadir}/${inname}.bval ${eddybase}.bval
 
 echo -e 'Renaming bvals and bvecs...done\n'
 
+touch eddy.done
 
 #=============================================================================
 
@@ -337,6 +343,7 @@ EOF
 
 } | tee -a "$logfile"
 # end of code block
+
 
 ###########
 # THE END #

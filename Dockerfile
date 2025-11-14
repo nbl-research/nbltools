@@ -44,9 +44,8 @@ ENV PATH="/opt/miniforge/bin:$PATH"
 # Install FSL packages using conda
 ENV FSL_CONDA_CHANNEL="https://fsl.fmrib.ox.ac.uk/fsldownloads/fslconda/public"
 RUN conda install -y --name base -c $FSL_CONDA_CHANNEL fsl-avwutils fsl-bet2 fsl-eddy fsl-eddy_qc fsl-topup -c conda-forge
-ENV FSLDIR="/opt/miniconda-latest"
+ENV FSLDIR="/opt/miniforge"
 RUN echo ". ${FSLDIR}/etc/fslconf/fsl.sh" >> ~/.bashrc
-ENV OMP_NUM_THREADS=4
 
 # Install TORTOISE
 RUN wget https://github.com/eurotomania/TORTOISEV4/releases/download/beta_rc.2.0.0/TORTOISE_package.tar.gz
@@ -59,20 +58,9 @@ ENV PATH="/opt/TORTOISE/bin:$PATH"
 RUN conda install -y -c conda-forge dcm2niix
 
 RUN mkdir /opt/nbl
-ADD scripts /opt/nbl/
-#COPY run_all /opt/nbl/
-#COPY run_all_tu /opt/nbl/
-#COPY prepare_4_topup /opt/nbl/
-#COPY run_fda_preproc /opt/nbl/
-#COPY run_eddy /opt/nbl/
-#COPY run_topup /opt/nbl/
-#COPY check_bvecs /opt/nbl/
-#COPY prepeddyindex /opt/nbl/
-#COPY nbl_register_brain_using_ants /opt/nbl/
-#COPY nbl_optibet_b0_ants /opt/nbl/
-#COPY nbl_intensity_scaling /opt/nbl/
+ADD preprocessing /opt/nbl/
 RUN mkdir -p /opt/nbl/data/REF
-COPY BRCATLASC_B0_TEMPLATE_2MM /opt/nbl/data/REF/BRCATLASC_B0_TEMPLATE_2MM
+COPY data/REF/BRCATLASC_B0_TEMPLATE_2MM /opt/nbl/data/REF/BRCATLASC_B0_TEMPLATE_2MM
 ENV PATH="/opt/nbl:$PATH"
 
 RUN mkdir /data

@@ -53,6 +53,7 @@ datadir=$(cd $datadir && pwd)
 
 #[ -d ${datadir}/DTI ] && datadir=${datadir}/DTI
 [ -d ${datadir}/dti ] && datadir=${datadir}/dti
+[ -d ${datadir}/dwi ] && datadir=${datadir}/dwi
 #[ -d ${datadir}/Diffusion ] && datadir=${datadir}/Diffusion
 #[ -d ${datadir}/diffusion ] && datadir=${datadir}/diffusion
 
