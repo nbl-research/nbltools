@@ -196,10 +196,21 @@ if [ $synb0Opt -eq 1 ]; then
     cp $subjdir/dwi/acqparams.txt $synb0Dir/INPUTS
     echo "0 1 0 0.000" >> $synb0Dir/INPUTS/acqparams.txt
     cp $t1w $synb0Dir/INPUTS/T1.nii.gz
+    
+    # Handle Docker-in-Docker path translation
+    if [ -n "$HOST_DATA" ]; then
+      synb0DirHost=${synb0Dir/\/data/$HOST_DATA}
+      fsLicenseHost=${fsLicense/\/data/$HOST_DATA}
+    else
+      synb0DirHost=$synb0Dir
+      fsLicenseHost=$fsLicense
+    fi
+
+    
     docker run --rm \
-      -v $synb0Dir/INPUTS/:/INPUTS/ \
-      -v $synb0Dir/OUTPUTS:/OUTPUTS/ \
-      -v ${fsLicense}:/extra/freesurfer/license.txt \
+      -v $synb0DirHost/INPUTS/:/INPUTS/ \
+      -v $synb0DirHost/OUTPUTS:/OUTPUTS/ \
+      -v ${fsLicenseHost}:/extra/freesurfer/license.txt \
       --user $(id -u):$(id -g) \
       leonyichencai/synb0-disco:v3.0 \
       --notopup \
