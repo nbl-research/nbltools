@@ -91,10 +91,10 @@ fi
 
 ###acq
 if [ -z ${acq+x} ]; then
-   if [ -f ${datadir}/acqparams.txt ]; then
-     acq=${datadir}/acqparams.txt
-   elif [ -f ${topupdir}/acqparams.txt ]; then
+   if [ -f ${topupdir}/acqparams.txt ]; then
      acq=${topupdir}/acqparams.txt
+   elif [ -f ${datadir}/acqparams.txt ]; then
+     acq=${datadir}/acqparams.txt
    else
      echo ""
      echo " Could not find acquisition parameters file acqparams.txt"
@@ -132,7 +132,7 @@ fi
 
 # Try to find config file in FSLDIR. If not there, try in NBL git dir.
 # Otherwise revert back to default config file.
-configFile=$FSLDIR/src/topup/flirtsch/$configName
+configFile=$FSLDIR/etc/flirtsch/$configName
 if [ ! -f $configFile ]; then
   configFile=~/git/nbltools/third_parties/topup_config/$configName
 fi
@@ -200,7 +200,7 @@ $topupCmd
 echo -e '\n--------------------'
 echo -e 'Running topup...done'
 
-[ "$(dirname $acq)" != "$datadir" ] && cp $acq $datadir
+[ "$(dirname $acq)" != "$datadir" ] && cp $acq $topupdir
 
 #================
 # GET BRAIN MASK

@@ -86,7 +86,7 @@ stdStr=
 sxm=0
 furtherStr=
 furtherFlag=
-cudaOpt=1
+cudaOpt=${NBL_EDDY_DEFAULT:-1}
 synb0Opt=0
 
 while [[ $# -gt 0 ]]; do
@@ -200,7 +200,7 @@ if [ $synb0Opt -eq 1 ]; then
     # Handle Docker-in-Docker path translation
     if [ -n "$HOST_DATA" ]; then
       synb0DirHost=${synb0Dir/\/data/$HOST_DATA}
-      fsLicenseHost=${fsLicense/\/data/$HOST_DATA}
+      fsLicenseHost=${fsLicense/\/freesurfer/$HOST_FREESURFER}
     else
       synb0DirHost=$synb0Dir
       fsLicenseHost=$fsLicense
@@ -212,11 +212,11 @@ if [ $synb0Opt -eq 1 ]; then
       -v $synb0DirHost/OUTPUTS:/OUTPUTS/ \
       -v ${fsLicenseHost}:/extra/freesurfer/license.txt \
       --user $(id -u):$(id -g) \
+      -e ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=$(nproc) \
       leonyichencai/synb0-disco:v3.0 \
       --notopup \
       $synb0stripped
     prepeddyindex ${dwiFile%.nii.gz}.bval -o $subjdir/dwi/index.txt -s
-    cp $synb0Dir/INPUTS/acqparams.txt $subjdir/dwi
   fi
   numb0=1
   intScal=0
@@ -226,6 +226,7 @@ fi
 if [ $prep -eq 1 ]; then
   if [ $synb0Opt -eq 1 ]; then
     mkdir $subjdir/dwi/topup
+    cp $subjdir/dwi/synb0/INPUTS/acqparams.txt $subjdir/dwi/topup/
     fslmerge -t $subjdir/dwi/topup/${subj}_b0s_4_topup $subjdir/dwi/synb0/OUTPUTS/b0_d_smooth  $subjdir/dwi/synb0/OUTPUTS/b0_u
   else
     prepare_4_topup $subjdir/dwi $numb0 $subj $intScal

@@ -33,7 +33,7 @@ Usage: $(basename $0) -d <data directory> -i <input file name> [options]
     -f <options> ...........(**DOUBLE-QUOTED** string of further options as per eddy's manual. See example 3.)
   
   List of hard-coded options always passed to eddy through this script:
-    --niter=6  --ol_pos  --fwhm=10,5,2,0,0,0  --data_is_shelled  --cnr_maps  --residuals  --very_verbose
+    --niter=6  --ol_pos  --fwhm=10,5,2,0,0,0  --data_is_shelled  --verbose
 
   Notes:
   * This script will always ask eddy to consider positive outliers (i.e. not only signal dropout).
@@ -96,8 +96,10 @@ done
 ### cuda vs openmp
 if [ ! -z ${cuda+x} ]; then
   eddyCmd="eddy_cuda"
+  cnr_res="--cnr_maps --residuals"
 else
-  eddyCmd="eddy_cpu --nthr=$(nproc)"
+  eddyCmd="eddy_cpu --nthr=$(nproc) --dont_peas"
+  cnr_res=""
 fi
 
 ### datadir
@@ -300,9 +302,7 @@ eddyCmd="$eddyCmd \
 --ol_nstd=${stdv} \
 --fwhm=10,5,2,0,0,0 \
 --data_is_shelled \
---cnr_maps \
---residuals \
---very_verbose $further" 
+--verbose $cnr_res $further" 
 
 echo "$eddyCmd" | awk '{$1=$1}1' OFS='\n '
 

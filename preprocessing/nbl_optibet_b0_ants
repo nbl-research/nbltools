@@ -70,9 +70,10 @@ outBase=${inputName}_tmp${RANDOM}_
 
 ### Define ref template files.
 if [ "$refDir" != "" ]; then
-  refDir=$(cd "$3" && pwd)
+  refDir=$(cd "$refDir" && pwd)
 else
-  refDir=/opt/nbl/data/REF/BRCATLASC_B0_TEMPLATE_2MM/
+  scriptDir=$(cd "$(dirname "$0")" && pwd)
+  refDir=$scriptDir/../data/REF/BRCATLASC_B0_TEMPLATE_2MM
 fi
 refName=$(basename $refDir)
 refBrain=$refDir/${refName}.nii.gz
