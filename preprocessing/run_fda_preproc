@@ -85,7 +85,8 @@ if [ "$exitStat" == "0" ]; then
   foundTortoiseBin=1
   echo $(basename $0): Found TORTOISE binaries.
 else
-  docker image inspect eurotomania/tortoise &>/dev/null
+  # Download the TORTOISE Docker image on first use (only checked for a local copy before).
+  docker image inspect eurotomania/tortoise &>/dev/null || { echo "$(basename $0): downloading the TORTOISE Docker image (first use)..."; docker pull eurotomania/tortoise; }
   exitStat=$(echo $?)
   if [ "$exitStat" == "0" ]; then
     foundTortoiseDocker=1
