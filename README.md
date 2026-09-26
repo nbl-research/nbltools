@@ -30,6 +30,19 @@ run_all_tu ./subject01 -f -y -p -t -m -e -c 0 -q
 
 Run `run_all_tu` without arguments to see all available options.
 
+#### Extra requirements for SynB0
+
+SynB0-DISCO needs more resources than the rest of the pipeline, in particular more memory:
+
+- **Docker:** SynB0-DISCO always runs in a Docker container, also with the native installation. Install [Docker Desktop](https://www.docker.com/products/docker-desktop), keep it running, and give it at least 16GB of memory (Settings > Resources).
+- **FreeSurfer license:** free from the [FreeSurfer registration page](https://surfer.nmr.mgh.harvard.edu/registration.html). FreeSurfer itself does not need to be installed. Copy your `license.txt` into `~/freesurfer_license/` and add this line to your shell configuration (`~/.zshrc` on macOS, `~/.bashrc` on Linux):
+
+```bash
+export FREESURFER="$HOME/freesurfer_license"
+```
+
+More details: [Extra Requirements for SynB0](https://nbl-research.github.io/nbltools.html#synb0-requirements).
+
 ### Docker
 
 Pull the pre-built image:
@@ -52,7 +65,7 @@ docker run -it \
   ghcr.io/nbl-research/nbltools bash
 ```
 
-Replace the paths with your actual data directory and FreeSurfer license location. The Docker socket and FreeSurfer mounts are only needed for SynB0-DISCO (`-y` flag).
+Replace the paths with your actual data directory and the folder containing your FreeSurfer `license.txt` (FreeSurfer itself does not need to be installed). The Docker socket and FreeSurfer mounts are only needed for SynB0-DISCO (`-y` flag).
 
 ### Building the Docker image
 
