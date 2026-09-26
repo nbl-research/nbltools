@@ -98,7 +98,7 @@ if [ ! -z ${cuda+x} ]; then
   eddyCmd="eddy_cuda"
   cnr_res="--cnr_maps --residuals"
 else
-  eddyCmd="eddy_cpu --nthr=$(nproc) --dont_peas"
+  eddyCmd="eddy_cpu --nthr=$(nproc 2>/dev/null || sysctl -n hw.ncpu) --dont_peas"
   cnr_res=""
 fi
 

@@ -173,7 +173,25 @@ if [ $synb0Opt -eq 1 ]; then
   if [ -f $subjdir/dwi/synb0/OUTPUTS/b0_u.nii.gz ]; then
     echo "Found SynB0-DISCO output. Skipping..."
   else
-    fsLicense=$(find $FREESURFER -maxdepth 1 -name "*license*")
+    # SynB0-DISCO needs a FreeSurfer licence: exactly one *license* file in $FREESURFER.
+    if [ -z "$FREESURFER" ] || [ ! -d "$FREESURFER" ]; then
+      echo "$(basename $0): ERROR: FREESURFER must point to the folder holding the FreeSurfer license.txt (needed by SynB0-DISCO)."
+      exit 1
+    fi
+    fsLicense=$(find "$FREESURFER" -maxdepth 1 -name "*license*")
+    if [ $(echo "$fsLicense" | grep -c .) -ne 1 ]; then
+      echo "$(basename $0): ERROR: expected exactly one FreeSurfer licence file in $FREESURFER, found: ${fsLicense:-none}"
+      exit 1
+    fi
+    # SynB0-DISCO runs in Docker: check Docker is reachable and has enough memory.
+    dockerMem=$(docker info --format '{{.MemTotal}}' 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$dockerMem" ] || [ "$dockerMem" == "0" ]; then
+      echo "$(basename $0): ERROR: cannot reach Docker (needed by SynB0-DISCO). Is Docker running?"
+      exit 1
+    fi
+    if [ $dockerMem -lt 16106127360 ]; then
+      echo "$(basename $0): WARNING: Docker has $((dockerMem/1073741824)) GiB of memory. SynB0-DISCO needs about 16 GB and may be killed during inference."
+    fi
     t1w=$subjdir/anat/${subj}_T1w.nii.gz
     t1wb=$subjdir/anat/${subj}_T1w_brain.nii.gz
     if [ -f "$t1wb" ]; then
@@ -196,26 +214,35 @@ if [ $synb0Opt -eq 1 ]; then
     cp $subjdir/dwi/acqparams.txt $synb0Dir/INPUTS
     echo "0 1 0 0.000" >> $synb0Dir/INPUTS/acqparams.txt
     cp $t1w $synb0Dir/INPUTS/T1.nii.gz
+    # Licence goes next to the inputs so it is always in a folder Docker can mount
+    # (no HOST_FREESURFER needed for Docker-in-Docker); removed after the run.
+    cp "$fsLicense" $synb0Dir/INPUTS/license.txt
     
     # Handle Docker-in-Docker path translation
     if [ -n "$HOST_DATA" ]; then
       synb0DirHost=${synb0Dir/\/data/$HOST_DATA}
-      fsLicenseHost=${fsLicense/\/freesurfer/$HOST_FREESURFER}
     else
       synb0DirHost=$synb0Dir
-      fsLicenseHost=$fsLicense
     fi
 
     
     docker run --rm \
       -v $synb0DirHost/INPUTS/:/INPUTS/ \
       -v $synb0DirHost/OUTPUTS:/OUTPUTS/ \
-      -v ${fsLicenseHost}:/extra/freesurfer/license.txt \
+      -v $synb0DirHost/INPUTS/license.txt:/extra/freesurfer/license.txt \
       --user $(id -u):$(id -g) \
-      -e ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=$(nproc) \
+      -e ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=$(nproc 2>/dev/null || sysctl -n hw.ncpu) \
       leonyichencai/synb0-disco:v3.0 \
       --notopup \
       $synb0stripped
+    rm -f $synb0Dir/INPUTS/license.txt
+    # SynB0-DISCO's own script carries on after errors, so check for its output.
+    if [ ! -f $synb0Dir/OUTPUTS/b0_u.nii.gz ]; then
+      echo "$(basename $0): ERROR: SynB0-DISCO did not produce $synb0Dir/OUTPUTS/b0_u.nii.gz."
+      echo "  See the messages above. Common causes: the docker run did not start (mount or licence),"
+      echo "  or Docker ran out of memory ('Killed' during 'Performing inference')."
+      exit 1
+    fi
     prepeddyindex ${dwiFile%.nii.gz}.bval -o $subjdir/dwi/index.txt -s
   fi
   numb0=1
